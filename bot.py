@@ -757,6 +757,8 @@ class Bot:
     def run_once(self) -> dict:
         """Один проход для запуска по расписанию (cron / GitHub Actions)."""
         self.setup()
+        log.info("Подписчиков: %s, админ: %s, инструментов: %s",
+                 len(self.state.subscribers), self.state.admin_id, len(self.instruments))
         report = self.scan_once(notify=True)
         try:
             updates = self.api.get_updates(self.state.data.get("update_offset"), timeout=0)
