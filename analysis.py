@@ -326,10 +326,16 @@ def format_stats(bt_stats: dict, history: list[dict], name: str, timeframe: str 
         rs = [t["r"] for t in history]
         wins = sum(1 for r in rs if r > 0)
         total = sum(rs)
+        gross_win = sum(r for r in rs if r > 0)
+        gross_loss = -sum(r for r in rs if r <= 0)
+        pf = gross_win / gross_loss if gross_loss > 0 else float("inf")
+        equity = np.cumsum(rs)
+        drawdown = float((np.maximum.accumulate(equity) - equity).max()) if len(equity) else 0.0
         lines += [
-            f"<b>Live-сигналы</b>",
+            "<b>Live-сигналы</b>",
             f"Закрыто сделок: {len(rs)} · побед {wins / len(rs) * 100:.0f}%",
-            f"Итог: {total:+.2f}R",
+            f"Profit factor: {pf:.2f}",
+            f"Итог: {total:+.2f}R · макс. просадка {drawdown:.1f}R",
         ]
     else:
         lines.append("<b>Live-сигналы</b>: пока ни одной закрытой сделки.")

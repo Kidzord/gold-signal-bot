@@ -19,6 +19,8 @@ DEFAULT_CONFIG = {
     "instruments": [],
     "risk_limits": {"daily_r": -2.0, "weekly_r": -3.0, "monthly_r": -7.0},
     "web": {"enabled": False, "host": "127.0.0.1", "port": 8080},
+    "max_risk_per_symbol": 2,
+    "digest_hour": 18,
 }
 
 DEFAULT_STATE = {

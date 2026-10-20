@@ -18,6 +18,8 @@ import threading
 import time
 from datetime import datetime, timezone
 
+import pandas as pd
+
 if sys.stdout:
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 if sys.stderr:
@@ -250,8 +252,90 @@ class Bot:
                 self.state._flush()
                 log.info("Состояние %s перенесено в слот %s", legacy, target)
 
+    def _symbol_open(self, symbol: str) -> int:
+        """Сколько сделок открыто по символу во всех инструментах и стратегиях."""
+        count = 0
+        for inst in self.instruments:
+            if inst.symbol != symbol:
+                continue
+            for strategy in inst.slots:
+                if self.state.trade_for(self._slot_key(inst, strategy)):
+                    count += 1
+        return count
+
+    def _missed_signals(self, inst: inst_mod.Instrument, strategy: str, df, key: str) -> list[dict]:
+        """Сигналы, сработавшие, пока бот не работал (между последним баром и текущим)."""
+        last = self.state.last_bar_for(key)
+        if not last:
+            return []
+        try:
+            last_ts = pd.Timestamp(last)
+        except ValueError:
+            return []
+        step = pd.Timedelta("4h" if inst.timeframe == "4h" else "1h")
+        expected = last_ts + step
+        missed_bars = df.index[df.index > expected]
+        if len(missed_bars) == 0:
+            return []
+
+        sig = st.signals_for(strategy, df, inst.params)
+        out = []
+        for ts in missed_bars:
+            row = sig.loc[ts]
+            side = "long" if bool(row["long_signal"]) else ("short" if bool(row["short_signal"]) else None)
+            if side:
+                out.append({"time": ts, "side": side})
+        return out
+
+    def _missed_text(self, missed: list[tuple]) -> str:
+        lines = ["⚠️ <b>Пропущенные сигналы</b>", "<i>бот не работал в это время</i>", ""]
+        for inst, strategy, item in missed[:8]:
+            local = analysis._local(item["time"], self.tz)
+            word = "покупка" if item["side"] == "long" else "продажа"
+            lines.append(f"• {inst.name} {inst.timeframe} · {strategy} — {word}, {local}")
+        if len(missed) > 8:
+            lines.append(f"… и ещё {len(missed) - 8}")
+        lines += ["", "<i>Сделки не открывались, цены входа уже неактуальны. "
+                      "Это только информация.</i>"]
+        return "\n".join(lines)
+
+    def _digest_text(self) -> str:
+        snap = self.snapshot or {}
+        lines = [f"🗓 <b>Дайджест · {snap.get('updated', '')}</b>", ""]
+        for item in snap.get("instruments", []):
+            digits = item.get("digits", 2)
+            trades = item.get("trades") or []
+            trade_txt = (
+                " · ".join(f"{t['strategy']} {t['side']} {t['r_now']:+.2f}R" for t in trades)
+                if trades else "сделок нет"
+            )
+            risk = item.get("risk", {})
+            lines.append(
+                f"<b>{item['name']}</b> {item['timeframe']}: {item['price']:.{digits}f} · "
+                f"{tg.esc(item.get('trend', '—'))}\n"
+                f"    {trade_txt}\n"
+                f"    день {risk.get('day', 0):+.1f}R · неделя {risk.get('week', 0):+.1f}R · "
+                f"месяц {risk.get('month', 0):+.1f}R"
+            )
+        return "\n".join(lines)
+
+    def _maybe_digest(self, notify: bool) -> None:
+        hour = self.config.get("digest_hour")
+        if hour is None or not notify:
+            return
+        now = datetime.now(timezone.utc)
+        if now.hour != int(hour):
+            return
+        today = now.date().isoformat()
+        if self.state.data.get("last_digest") == today:
+            return
+        self.state.data["last_digest"] = today
+        self.state._flush()
+        log.info("Отправляю дайджест за %s", today)
+        self.broadcast(self._digest_text())
+
     def scan_once(self, notify: bool = True) -> dict:
-        report: dict = {"ok": True, "signals": [], "closed": [], "errors": []}
+        report: dict = {"ok": True, "signals": [], "closed": [], "errors": [], "missed": []}
         snapshot: dict = {
             "updated": analysis._local(datetime.now(timezone.utc), self.tz),
             "subscribers": len(self.state.subscribers),
@@ -271,6 +355,10 @@ class Bot:
                 report["ok"] = False
                 report["errors"].append(f"{inst.key}: {exc}")
         self.snapshot = snapshot
+        if notify:
+            if report.get("missed"):
+                self.broadcast(self._missed_text(report["missed"]))
+            self._maybe_digest(notify)
         return report
 
     def _instrument_snapshot(self, inst: inst_mod.Instrument, df) -> dict:
@@ -348,10 +436,22 @@ class Bot:
         bar_key = df.index[-1].isoformat()
         if self.state.last_bar_for(key) == bar_key:
             return
+
+        missed = self._missed_signals(inst, strategy, df, key)
+        if missed:
+            report.setdefault("missed", []).extend((inst, strategy, m) for m in missed)
+
         self.state.set_last_bar(key, bar_key)
 
         open_now = [s for s in inst.slots if self.state.trade_for(self._slot_key(inst, s))]
         if len(open_now) >= max_parallel:
+            return
+
+        # общий риск по символу: не больше max_risk_per_symbol одновременных сделок
+        max_symbol = int(self.config.get("max_risk_per_symbol", 2))
+        if self._symbol_open(inst.symbol) >= max_symbol:
+            log.info("Лимит риска по %s: уже %s сделок, пропускаю %s",
+                     inst.symbol, self._symbol_open(inst.symbol), key)
             return
 
         risk = self._risk_status(inst)

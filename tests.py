@@ -7,6 +7,7 @@ from __future__ import annotations
 import os
 import sys
 import tempfile
+from datetime import datetime, timedelta, timezone
 
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
@@ -266,9 +267,48 @@ def main() -> None:
     check("снимок инструмента собирается", snap["name"] == "XAUUSD" and "risk" in snap
           and snap["strategies"] == bot.instruments[0].slots)
 
-    # --- риск-лимиты (после сканера, чтобы не блокировать его сигналы)
-    from datetime import datetime, timedelta, timezone
+    # --- новые возможности: риск по символу, пропущенные сигналы, дайджест
+    import instruments as inst_mod
 
+    extra = inst_mod.Instrument(key="gold_alt", symbol="GC=F", name="XAUUSD",
+                                timeframe="1h", strategy="asian")
+    bot.instruments.append(extra)
+    gold_slot = bot._slot_key(bot.instruments[0], bot.instruments[0].slots[0])
+    alt_slot = bot._slot_key(extra, "asian")
+    st.set_trade(gold_slot, {"side": "long", "entry": 1.0, "stop": 0.9, "tp": 1.2,
+                             "risk": 0.1, "strategy": "breakout"})
+    st.set_trade(alt_slot, {"side": "long", "entry": 1.0, "stop": 0.9, "tp": 1.2,
+                            "risk": 0.1, "strategy": "asian"})
+    check("считает сделки по символу", bot._symbol_open("GC=F") == 2, str(bot._symbol_open("GC=F")))
+    check("лимит по символу достигается",
+          bot._symbol_open("GC=F") >= int(bot.config.get("max_risk_per_symbol", 2)))
+    st.set_trade(alt_slot, None)
+    st.set_trade(gold_slot, None)
+    bot.instruments.pop()
+
+    old_bar = (df.index[-1] - pd.Timedelta(hours=3)).isoformat()
+    st.set_last_bar(gold_slot, old_bar)
+    missed = bot._missed_signals(bot.instruments[0], bot.instruments[0].slots[0], df, gold_slot)
+    check("пропущенные сигналы находятся", len(missed) >= 1, f"{len(missed)} шт.")
+    check("текст о пропущенных собирается",
+          "Пропущенные сигналы" in bot._missed_text([(bot.instruments[0], "breakout", missed[0])]))
+
+    bot.config.data["digest_hour"] = datetime.now(timezone.utc).hour
+    bot.snapshot = {"updated": "test", "instruments": []}
+    before = len(bot.api.sent)
+    bot._maybe_digest(notify=True)
+    after_first = len(bot.api.sent)
+    bot._maybe_digest(notify=True)
+    check("дайджест отправляется один раз", after_first > before and len(bot.api.sent) == after_first)
+
+    stats_text = analysis.format_stats({"trades": 10, "winrate": 40, "pf": 1.3,
+                                        "expectancy_r": 0.1, "total_r": 3.0, "max_dd_r": 2.0,
+                                        "days": 30, "title": "test"},
+                                       [{"r": 1.0}, {"r": -1.0}, {"r": 2.0}], "XAUUSD", "1h")
+    check("live-статистика расширена",
+          "Profit factor" in stats_text and "макс. просадка" in stats_text)
+
+    # --- риск-лимиты (после сканера, чтобы не блокировать его сигналы)
     now = datetime.now(timezone.utc)
     bad_day = {
         "side": "long", "entry": 100.0, "exit": 98.0, "r": -2.5,
