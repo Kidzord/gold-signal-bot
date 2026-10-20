@@ -1,0 +1,56 @@
+name: signals
+
+on:
+  schedule:
+    # каждые 10 минут (UTC). GitHub может задержать запуск на 5-20 минут
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: gold-signal-bot
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Восстановить состояние
+        uses: actions/cache/restore@v4
+        with:
+          path: state.json
+          key: bot-state-${{ github.run_id }}
+          restore-keys: |
+            bot-state-
+
+      - name: Зависимости
+        run: pip install -q -r requirements-bot.txt
+
+      - name: Конфиг без токена
+        run: cp config.ci.json config.json
+
+      - name: Один проход (сигналы + команды)
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+        run: python bot.py --once
+
+      - name: Подстраховать файл состояния
+        if: always()
+        run: |
+          if [ ! -f state.json ]; then echo '{}' > state.json; fi
+
+      - name: Сохранить состояние
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: state.json
+          key: bot-state-${{ github.run_id }}

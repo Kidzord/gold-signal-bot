@@ -1,0 +1,69 @@
+{
+  "telegram_token": "",
+  "channel_id": null,
+  "display_tz": "Europe/Minsk",
+  "scan_seconds": 300,
+  "instruments": [
+    {
+      "key": "gold",
+      "symbol": "GC=F",
+      "name": "XAUUSD",
+      "timeframe": "1h",
+      "strategy": "breakout",
+      "params": {},
+      "spread": 0.3,
+      "max_bars": 48,
+      "pip": 1.0,
+      "strategies": [
+        "breakout",
+        "asian"
+      ]
+    },
+    {
+      "key": "eurusd",
+      "symbol": "EURUSD=X",
+      "name": "EURUSD",
+      "timeframe": "4h",
+      "strategy": "channel",
+      "params": {
+        "channel": 48
+      },
+      "spread": 0.00012,
+      "max_bars": 30,
+      "pip": 0.0001
+    },
+    {
+      "key": "gbpusd",
+      "symbol": "GBPUSD=X",
+      "name": "GBPUSD",
+      "timeframe": "4h",
+      "strategy": "channel",
+      "params": {
+        "channel": 24
+      },
+      "spread": 0.00015,
+      "max_bars": 30,
+      "pip": 0.0001
+    },
+    {
+      "key": "gold4h",
+      "symbol": "GC=F",
+      "name": "XAUUSD",
+      "timeframe": "4h",
+      "strategy": "flip",
+      "params": {},
+      "spread": 0.3,
+      "max_bars": 72,
+      "pip": 1.0
+    }
+  ],
+  "risk_limits": {
+    "daily_r": -2.0,
+    "weekly_r": -3.0,
+    "monthly_r": -7.0
+  },
+  "symbol": "GC=F",
+  "display_name": "XAUUSD",
+  "strategy": "breakout",
+  "spread": 0.3
+}

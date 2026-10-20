@@ -1,0 +1,4 @@
+pandas>=2.0
+numpy>=1.26
+pypdf>=4.0
+pymupdf>=1.24

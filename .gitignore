@@ -1,0 +1,22 @@
+# состояние и секреты
+config.json
+state.json
+bot.log
+
+# кэш данных и временные файлы бэктестов
+cache/
+
+# собранные пересланные посты из каналов
+materials/
+
+# распознанные PDF и скачанные видео
+pdf_pages/
+pdf_text/
+video/
+
+# python
+__pycache__/
+*.pyc
+
+# архивы для загрузки на GitHub
+*.zip

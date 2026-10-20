@@ -1,0 +1,25 @@
+[Unit]
+Description=Gold & FX Telegram signal bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# замените на путь, куда положили проект, и на своего пользователя
+WorkingDirectory=/opt/gold-signal-bot
+ExecStart=/opt/gold-signal-bot/venv/bin/python /opt/gold-signal-bot/bot.py
+User=botuser
+Group=botuser
+Restart=always
+RestartSec=10
+StandardOutput=append:/var/log/gold-signal-bot.log
+StandardError=append:/var/log/gold-signal-bot.log
+
+# немного гигиены
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ReadWritePaths=/opt/gold-signal-bot
+
+[Install]
+WantedBy=multi-user.target
