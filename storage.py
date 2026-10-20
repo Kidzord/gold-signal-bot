@@ -18,6 +18,7 @@ DEFAULT_CONFIG = {
     "scan_seconds": 300,
     "instruments": [],
     "risk_limits": {"daily_r": -2.0, "weekly_r": -3.0, "monthly_r": -7.0},
+    "web": {"enabled": False, "host": "127.0.0.1", "port": 8080},
 }
 
 DEFAULT_STATE = {

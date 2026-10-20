@@ -1,0 +1,19 @@
+services:
+  bot:
+    build: .
+    container_name: gold-signal-bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      # весь проект с хоста: правки и state.json видны без пересборки
+      - .:/app
+    ports:
+      # веб-панель; чтобы открыть, включите её в config.json:
+      # "web": {"enabled": true, "host": "0.0.0.0", "port": 8080}
+      - "127.0.0.1:8080:8080"
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

@@ -233,6 +233,39 @@ def main() -> None:
     finally:
         analysis.load_frame = original_load
 
+    # --- веб-панель
+    import json
+    import urllib.request as _ur
+
+    import web as web_module
+
+    fake = {
+        "updated": "20.10.2026 21:00", "subscribers": 1, "username": "test",
+        "instruments": [{
+            "key": "gold", "name": "XAUUSD", "timeframe": "1h", "strategies": ["breakout"],
+            "digits": 2, "price": 4150.0, "trend": "вверх",
+            "trades": [{"strategy": "breakout", "side": "long", "entry": 4140.0, "r_now": 0.5}],
+            "risk": {"day": -0.5, "week": -0.5, "month": 1.0, "blocked": False},
+            "last_bar": "20.10 18:00",
+        }],
+    }
+    page = web_module.render_page(fake)
+    check("панель рендерится", "XAUUSD" in page and "breakout" in page)
+
+    server = web_module.start_server(lambda: fake, "127.0.0.1", 0)
+    port = server.server_address[1]
+    with _ur.urlopen(f"http://127.0.0.1:{port}/api/status", timeout=5) as resp:
+        data = json.loads(resp.read().decode())
+    check("API отдаёт состояние", data["instruments"][0]["name"] == "XAUUSD")
+    with _ur.urlopen(f"http://127.0.0.1:{port}/", timeout=5) as resp:
+        html = resp.read().decode()
+    check("HTML отдаётся", "<html" in html and "XAUUSD" in html)
+    server.shutdown()
+
+    snap = bot._instrument_snapshot(bot.instruments[0], df)
+    check("снимок инструмента собирается", snap["name"] == "XAUUSD" and "risk" in snap
+          and snap["strategies"] == bot.instruments[0].slots)
+
     # --- риск-лимиты (после сканера, чтобы не блокировать его сигналы)
     from datetime import datetime, timedelta, timezone
 

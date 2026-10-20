@@ -112,6 +112,8 @@ class Bot:
         self._migrate_legacy_slots()
         self.api: Tg | None = None
         self.me: dict = {}
+        self.snapshot: dict = {}
+        self.web_server = None
         self._stop = threading.Event()
         self._bt_cache: dict[str, dict] = {}
         self._started = time.time()
@@ -250,6 +252,12 @@ class Bot:
 
     def scan_once(self, notify: bool = True) -> dict:
         report: dict = {"ok": True, "signals": [], "closed": [], "errors": []}
+        snapshot: dict = {
+            "updated": analysis._local(datetime.now(timezone.utc), self.tz),
+            "subscribers": len(self.state.subscribers),
+            "username": self.me.get("username", "—"),
+            "instruments": [],
+        }
         for inst in self.instruments:
             try:
                 df = analysis.load_frame(inst.symbol, timeframe=inst.timeframe)
@@ -257,11 +265,58 @@ class Bot:
                     continue
                 for strategy in inst.slots:
                     self._scan_slot(inst, strategy, df, notify, report)
+                snapshot["instruments"].append(self._instrument_snapshot(inst, df))
             except Exception as exc:  # noqa: BLE001 — один инструмент не должен ронять остальные
                 log.exception("Ошибка сканирования %s", inst.key)
                 report["ok"] = False
                 report["errors"].append(f"{inst.key}: {exc}")
+        self.snapshot = snapshot
         return report
+
+    def _instrument_snapshot(self, inst: inst_mod.Instrument, df) -> dict:
+        ms = analysis.market_state(df)
+        trades = []
+        for strategy in inst.slots:
+            trade = self.state.trade_for(self._slot_key(inst, strategy))
+            if trade:
+                trades.append({
+                    "strategy": strategy,
+                    "side": trade["side"],
+                    "entry": trade["entry"],
+                    "r_now": analysis.current_risk(trade, ms["price"]),
+                })
+        risk = self._risk_status(inst)
+        return {
+            "key": inst.key,
+            "name": inst.name,
+            "timeframe": inst.timeframe,
+            "strategies": list(inst.slots),
+            "digits": inst.digits,
+            "price": ms["price"],
+            "trend": ms["trend"],
+            "last_bar": analysis._local(df.index[-1], self.tz),
+            "trades": trades,
+            "risk": {
+                "day": risk["sums"]["day"],
+                "week": risk["sums"]["week"],
+                "month": risk["sums"]["month"],
+                "blocked": bool(risk["blocked"]),
+            },
+        }
+
+    def start_web(self) -> None:
+        cfg = self.config.get("web") or {}
+        if not cfg.get("enabled"):
+            return
+        from web import start_server
+
+        host = cfg.get("host", "127.0.0.1")
+        port = int(cfg.get("port", 8080))
+        try:
+            self.web_server = start_server(lambda: self.snapshot, host, port)
+            log.info("Веб-панель: http://%s:%s", host, port)
+        except OSError as exc:
+            log.warning("Веб-панель не запустилась: %s", exc)
 
     @staticmethod
     def _title(strategy: str) -> str:
@@ -720,6 +775,7 @@ class Bot:
         self.setup()
         log.info("Инструменты: %s", ", ".join(
             f"{i.key}/{i.timeframe}[{','.join(i.slots)}]" for i in self.instruments))
+        self.start_web()
         thread = threading.Thread(target=self.scanner_loop, daemon=True)
         thread.start()
         try:

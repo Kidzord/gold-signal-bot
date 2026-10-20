@@ -1,0 +1,15 @@
+git
+.git
+.github
+cache
+materials
+pdf_pages
+pdf_text
+video
+__pycache__
+*.pyc
+*.zip
+config.json
+state.json
+bot.log
+report/*.png
