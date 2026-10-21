@@ -192,6 +192,9 @@ def format_signal(sig: dict, name: str, tz_name: str, timeframe: str = "1h",
     word = "ПОКУПКА" if long_ else "ПРОДАЖА"
     arrow = "↗" if long_ else "↘"
     r_dist = abs(sig["entry"] - sig["stop"])
+    # TP может быть задан уровнем (msnr/flip), поэтому считаем расстояние и RR по факту
+    tp_dist = abs(sig["tp"] - sig["entry"])
+    real_rr = tp_dist / r_dist if r_dist else 0.0
     d = digits
     sub = f"\n<i>{tg.esc(strategy_title)}</i>" if strategy_title else ""
     return (
@@ -200,8 +203,8 @@ def format_signal(sig: dict, name: str, tz_name: str, timeframe: str = "1h",
         f"────────────────\n"
         f"Вход: <b>{sig['entry']:.{d}f}</b>\n"
         f"Стоп: {sig['stop']:.{d}f} <i>(-{_dist(r_dist, d)})</i>\n"
-        f"Тейк: {sig['tp']:.{d}f} <i>(+{_dist(r_dist * sig['rr'], d)})</i>\n"
-        f"Риск/прибыль: 1 : {sig['rr']:.1f}\n"
+        f"Тейк: {sig['tp']:.{d}f} <i>(+{_dist(tp_dist, d)})</i>\n"
+        f"Риск/прибыль: 1 : {real_rr:.1f}\n"
         f"────────────────\n"
         f"📊 ADX {sig['adx']:.0f} · ATR {_dist(sig['atr'], d)} · тренд {tg.esc(sig['trend'])}\n"
         f"🧩 {tg.esc(sig['reason'])}\n"
@@ -310,7 +313,8 @@ def backtest_summary(df: pd.DataFrame, strategy: str = "breakout", params: dict 
     return s
 
 
-def format_stats(bt_stats: dict, history: list[dict], name: str, timeframe: str = "1h") -> str:
+def format_stats(bt_stats: dict, history: list[dict], name: str, timeframe: str = "1h",
+                 show_live: bool = True) -> str:
     lines = [f"📈 <b>Статистика · {tg.esc(name)} {timeframe.upper()}</b>", ""]
     if bt_stats and bt_stats["trades"]:
         lines += [
@@ -322,6 +326,8 @@ def format_stats(bt_stats: dict, history: list[dict], name: str, timeframe: str 
             f"Суммарно: {bt_stats['total_r']:+.0f}R · просадка {bt_stats['max_dd_r']:.0f}R",
             "",
         ]
+    if not show_live:
+        return "\n".join(lines)
     if history:
         rs = [t["r"] for t in history]
         wins = sum(1 for r in rs if r > 0)

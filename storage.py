@@ -32,6 +32,8 @@ DEFAULT_STATE = {
     "last_bars": {},
     "risk_paused": {},
     "started_at": None,
+    "sent_ids": [],
+    "instrument_overrides": {},
 }
 
 
@@ -74,6 +76,9 @@ class State:
         self.data = dict(DEFAULT_STATE)
         self.data["subscribers"] = []
         self.data["history"] = []
+        # изменяемые контейнеры не должны делить ссылку с DEFAULT_STATE
+        self.data["sent_ids"] = []
+        self.data["instrument_overrides"] = {}
         if os.path.exists(path):
             try:
                 with open(path, encoding="utf-8") as fh:
@@ -86,7 +91,9 @@ class State:
             self.data["started_at"] = datetime.now(timezone.utc).isoformat()
 
     def _flush(self) -> None:
-        _atomic_write(self.path, self.data)
+        # RLock реентрантный: вызовы из уже захваченного with self.lock не ломаются
+        with self.lock:
+            _atomic_write(self.path, self.data)
 
     # --- подписчики
     def add_subscriber(self, chat_id: int) -> bool:
@@ -164,6 +171,25 @@ class State:
 
     def last_bar_for(self, key: str) -> str | None:
         return self._last_bars().get(key)
+
+    # --- идемпотентность отправки сигналов
+    def mark_sent(self, signal_id: str, limit: int = 500) -> bool:
+        """True — id новый (можно отправлять), False — уже отправляли."""
+        with self.lock:
+            ids = self.data.get("sent_ids")
+            if not isinstance(ids, list):
+                ids = self.data["sent_ids"] = []
+            sid = str(signal_id)
+            if sid in ids:
+                return False
+            ids.append(sid)
+            if limit > 0:
+                del ids[:-limit]
+            self._flush()
+            return True
+
+    def was_sent(self, signal_id: str) -> bool:
+        return str(signal_id) in (self.data.get("sent_ids") or [])
 
     def set_last_bar(self, key: str, value: str) -> None:
         with self.lock:

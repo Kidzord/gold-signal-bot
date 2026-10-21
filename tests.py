@@ -8,6 +8,7 @@ import os
 import sys
 import tempfile
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
@@ -45,8 +46,13 @@ class FakeTg:
 
 
 def make_frame(n: int = 700) -> pd.DataFrame:
-    """Монотонный аптренд: на каждом баре пробой 24-часового максимума."""
-    idx = pd.date_range("2026-01-01", periods=n, freq="1h", tz="UTC")
+    """Монотонный аптренд: на каждом баре пробой 24-часового максимума.
+
+    Индекс заканчивается последним закрытым часом: сканер не открывает входы
+    по устаревшему фиду (см. Bot._data_fresh).
+    """
+    end = pd.Timestamp.now(tz="UTC").floor("h")
+    idx = pd.date_range(end=end, periods=n, freq="1h", tz="UTC")
     close = np.arange(n, dtype=float) * 1.0 + 2000.0
     noise = np.sin(np.arange(n) / 3.0) * 0.3
     close = close + noise
@@ -84,6 +90,14 @@ def main() -> None:
     check("стоп ниже входа, тейк выше", sig["stop"] < sig["entry"] < sig["tp"])
     check("риск = 1.5*ATR", abs(sig["risk"] - 1.5 * sig["atr"]) < 1e-6)
     check("RR = 2", abs((sig["tp"] - sig["entry"]) / sig["risk"] - 2) < 1e-6)
+
+    # карточка сигнала: цифры считаются от фактического TP, а не от risk*rr
+    card = analysis.format_signal(
+        dict(sig, tp=sig["entry"] + 8 * sig["risk"], rr=3.0),
+        "XAUUSD", "Europe/Minsk", "1h", 2, "MSNR",
+    )
+    check("карточка: расстояние до тейка по факту", f"+{8 * sig['risk']:.2f} $" in card)
+    check("карточка: RR по факту", "1 : 8.0" in card)
 
     # --- сопровождение: тейк
     trade = dict(sig, bar_time=df.index[-1], status="open")
@@ -293,7 +307,8 @@ def main() -> None:
     check("текст о пропущенных собирается",
           "Пропущенные сигналы" in bot._missed_text([(bot.instruments[0], "breakout", missed[0])]))
 
-    bot.config.data["digest_hour"] = datetime.now(timezone.utc).hour
+    # digest_hour трактуется в часовом поясе бота, а не в UTC
+    bot.config.data["digest_hour"] = datetime.now(timezone.utc).astimezone(ZoneInfo(bot.tz)).hour
     bot.snapshot = {"updated": "test", "instruments": []}
     before = len(bot.api.sent)
     bot._maybe_digest(notify=True)

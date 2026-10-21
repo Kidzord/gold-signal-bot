@@ -1,0 +1,32 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Зависимости
+        run: pip install -q -r requirements-bot.txt
+
+      - name: Офлайн-тесты
+        run: python tests.py
+
+      - name: Линтер (не блокирует сборку)
+        continue-on-error: true
+        run: |
+          pip install -q ruff
+          ruff check .

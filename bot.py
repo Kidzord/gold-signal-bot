@@ -17,6 +17,7 @@ import sys
 import threading
 import time
 from datetime import datetime, timedelta, timezone
+from logging.handlers import RotatingFileHandler
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -37,7 +38,8 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 LOG_PATH = os.path.join(BASE_DIR, "bot.log")
 MATERIALS_DIR = os.path.join(BASE_DIR, "materials")
 
-_handlers = [logging.FileHandler(LOG_PATH, encoding="utf-8")]
+_handlers = [RotatingFileHandler(LOG_PATH, maxBytes=5 * 1024 * 1024, backupCount=3,
+                                  encoding="utf-8")]
 if sys.stdout:
     _handlers.insert(0, logging.StreamHandler(sys.stdout))
 
@@ -122,6 +124,7 @@ class Bot:
         self.instruments = inst_mod.from_config(self.config.get("instruments"))
         if not self.config.get("instruments"):
             self._persist_instruments()
+        self._apply_instrument_overrides()
         self._migrate_legacy_slots()
         self.api: Tg | None = None
         self.me: dict = {}
@@ -271,6 +274,41 @@ class Bot:
                 self.state._flush()
                 log.info("Состояние %s перенесено в слот %s", legacy, target)
 
+    def _apply_instrument_overrides(self) -> None:
+        """Стратегии, выбранные админом, живут в state.json.
+
+        В GitHub Actions config.json пересоздаётся из config.ci.json на каждом запуске,
+        поэтому выбор из /strategy там иначе терялся бы через 10 минут.
+        """
+        overrides = self.state.data.get("instrument_overrides") or {}
+        for inst in self.instruments:
+            keys = overrides.get(inst.key)
+            if isinstance(keys, list) and keys and all(k in st.CATALOG for k in keys):
+                inst.strategies = [str(k) for k in keys]
+                inst.strategy = inst.strategies[0]
+
+    # насколько старым может быть последний закрытый бар, прежде чем новые входы запрещаются
+    MAX_DATA_AGE = {"1h": 4 * 3600, "4h": 12 * 3600}
+
+    def _data_fresh(self, inst: inst_mod.Instrument, df) -> bool:
+        """Проверка, что фид не отдаёт устаревшие бары.
+
+        Если последний бар старее 4 ч (H1) / 12 ч (H4), вход по нему уже неактуален:
+        открытая сделка продолжает сопровождаться, но новые сигналы не выдаются.
+        """
+        if df.empty:
+            return False
+        limit = self.MAX_DATA_AGE.get(inst.timeframe, 12 * 3600)
+        last = df.index[-1]
+        if last.tzinfo is None:
+            last = last.tz_localize("UTC")
+        age = (pd.Timestamp.now(tz="UTC") - last).total_seconds()
+        if age <= limit:
+            return True
+        log.warning("Данные %s устарели: последний бар %s, %.1f ч назад",
+                    inst.key, last, age / 3600)
+        return False
+
     def _symbol_open(self, symbol: str) -> int:
         """Сколько сделок открыто по символу во всех инструментах и стратегиях."""
         count = 0
@@ -340,7 +378,8 @@ class Bot:
         hour = self.config.get("digest_hour")
         if hour is None or not notify:
             return
-        now = datetime.now(timezone.utc)
+        # digest_hour задаётся в display_tz, а не в UTC
+        now = datetime.now(timezone.utc).astimezone(ZoneInfo(self.tz))
         if now.hour != int(hour):
             return
         today = now.date().isoformat()
@@ -368,8 +407,11 @@ class Bot:
                 df = analysis.load_frame(inst.symbol, timeframe=inst.timeframe)
                 if df.empty or len(df) < 250:
                     continue
+                fresh = self._data_fresh(inst, df)
+                if not fresh:
+                    report.setdefault("stale", []).append(inst.key)
                 for strategy in inst.slots:
-                    self._scan_slot(inst, strategy, df, notify, report)
+                    self._scan_slot(inst, strategy, df, notify, report, allow_new=fresh)
                 snapshot["instruments"].append(self._instrument_snapshot(inst, df))
             except Exception as exc:  # noqa: BLE001 — один инструмент не должен ронять остальные
                 log.exception("Ошибка сканирования %s", inst.key)
@@ -436,7 +478,7 @@ class Bot:
             return strategy
 
     def _scan_slot(self, inst: inst_mod.Instrument, strategy: str, df, notify: bool,
-                   report: dict) -> None:
+                   report: dict, allow_new: bool = True) -> None:
         key = self._slot_key(inst, strategy)
         max_parallel = int(self.config.get("max_parallel", 2))
 
@@ -452,6 +494,9 @@ class Bot:
                     self.broadcast(analysis.format_close(
                         trade, result, inst.name, self.tz, inst.digits,
                         strategy_title=self._title(strategy)))
+            return
+
+        if not allow_new:  # фид устарел — новые входы не открываем
             return
 
         bar_key = df.index[-1].isoformat()
@@ -497,12 +542,16 @@ class Bot:
         signal["detected_at"] = datetime.now(timezone.utc).isoformat()
         self.state.set_trade(key, signal)
         report["signals"].append((key, signal))
-        if notify:
+        # id сигнала (side-бар) не содержит инструмент: три слота на одном баре дали бы один id
+        dedupe_key = f"{key}:{signal['id']}"
+        if notify and self.state.mark_sent(dedupe_key):
             sent = self.broadcast(analysis.format_signal(
                 signal, inst.name, self.tz, inst.timeframe, inst.digits,
                 strategy_title=self._title(strategy)))
             log.info("Сигнал %s/%s %s @ %.4f -> %s получателей",
                      inst.key, strategy, signal["side"], signal["entry"], sent)
+        elif notify:
+            log.info("Сигнал %s уже отправлялся — повторно не шлю", dedupe_key)
 
     def scanner_loop(self) -> None:
         interval = int(self.config.get("scan_seconds", 300))
@@ -600,6 +649,8 @@ class Bot:
 
         if cmd == "start":
             added = self.state.add_subscriber(chat_id)
+            if not self.state.admin_id:
+                self.state.admin_id = user_id  # первый подписчик становится админом
             head = f"👋 Привет{', ' + username if username else ''}!\n\n" if added else "Вы уже подписаны.\n\n"
             return head + self._welcome()
 
@@ -664,7 +715,11 @@ class Bot:
             inst.strategies = keys
             inst.strategy = keys[0]
             self._persist_instruments()
-            self._bt_cache.pop(inst.key, None)
+            # в GitHub Actions config.json пересоздаётся каждый запуск — держим выбор в state.json
+            self.state.data.setdefault("instrument_overrides", {})[inst.key] = list(keys)
+            self.state._flush()
+            for cache_key in [k for k in self._bt_cache if k.startswith(f"{inst.key}:")]:
+                self._bt_cache.pop(cache_key, None)
             titles = ", ".join(self._title(k) for k in keys)
             return f"✅ {inst.name}: стратегии — <b>{titles}</b>"
 
@@ -776,15 +831,31 @@ class Bot:
         lines += ["", f"Детально: /signal {self.instruments[0].key}"]
         return "\n".join(lines)
 
-    def _stats_text(self, inst: inst_mod.Instrument) -> str:
-        if inst.key not in self._bt_cache:
+    def _backtest_for(self, inst: inst_mod.Instrument, strategy: str) -> dict:
+        """Бэктест слота с теми же параметрами, с которыми он работает в live."""
+        key = self._slot_key(inst, strategy)
+        if key not in self._bt_cache:
             df = analysis.load_frame(inst.symbol, timeframe=inst.timeframe)
-            self._bt_cache[inst.key] = analysis.backtest_summary(
-                df, inst.slots[0], inst.params, spread=inst.spread, max_bars=inst.max_bars
+            self._bt_cache[key] = analysis.backtest_summary(
+                df, strategy, inst.params, spread=inst.spread, max_bars=inst.max_bars
             )
+        return self._bt_cache[key]
+
+    def _stats_text(self, inst: inst_mod.Instrument) -> str:
         history = [t for s in inst.slots for t in self.state.history_for(self._slot_key(inst, s))]
         title = f"{inst.name} [{', '.join(inst.slots)}]"
-        return analysis.format_stats(self._bt_cache[inst.key], history, title, inst.timeframe)
+        multiple = len(inst.slots) > 1
+        blocks = []
+        for position, strategy in enumerate(inst.slots):
+            name = f"{title} · {strategy}" if multiple else title
+            blocks.append(analysis.format_stats(
+                self._backtest_for(inst, strategy),
+                history,
+                name,
+                inst.timeframe,
+                show_live=position == 0,
+            ))
+        return "\n\n".join(blocks)
 
     def _welcome(self) -> str:
         names = ", ".join(f"{i.name} ({i.timeframe})" for i in self.instruments)
