@@ -11,6 +11,9 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
 STATE_PATH = os.path.join(BASE_DIR, "state.json")
 
+# личные настройки подписчика: депозит в $, риск на сделку в % , дневной стоп в %
+DEFAULT_PROFILE = {"deposit": 5000.0, "risk": 1.0, "day_limit": 5.0}
+
 DEFAULT_CONFIG = {
     "telegram_token": "",
     "channel_id": None,
@@ -18,6 +21,7 @@ DEFAULT_CONFIG = {
     "scan_seconds": 300,
     "instruments": [],
     "risk_limits": {"daily_r": -2.0, "weekly_r": -3.0, "monthly_r": -7.0},
+    "default_profile": dict(DEFAULT_PROFILE),
     "web": {"enabled": False, "host": "127.0.0.1", "port": 8080},
     "max_risk_per_symbol": 2,
     "digest_hour": 18,
@@ -35,6 +39,10 @@ DEFAULT_STATE = {
     "sent_ids": [],
     "instrument_overrides": {},
     "admin_unsubscribed": False,
+    "profiles": {},
+    "day_r": {},
+    "pending": {},
+    "pause_notice": {},
 }
 
 
@@ -80,6 +88,10 @@ class State:
         # изменяемые контейнеры не должны делить ссылку с DEFAULT_STATE
         self.data["sent_ids"] = []
         self.data["instrument_overrides"] = {}
+        self.data["profiles"] = {}
+        self.data["day_r"] = {}
+        self.data["pending"] = {}
+        self.data["pause_notice"] = {}
         if os.path.exists(path):
             try:
                 with open(path, encoding="utf-8") as fh:
@@ -116,6 +128,64 @@ class State:
     @property
     def subscribers(self) -> list[int]:
         return list(self.data["subscribers"])
+
+    # --- личные настройки подписчика: депозит, риск на сделку, дневной стоп
+
+    def _profiles(self) -> dict:
+        self.data.setdefault("profiles", {})
+        return self.data["profiles"]
+
+    def profile_for(self, chat_id, defaults: dict | None = None) -> dict:
+        """Настройки подписчика; defaults — значения по умолчанию из конфига."""
+        base = dict(DEFAULT_PROFILE)
+        base.update(defaults or {})
+        base.update(self._profiles().get(str(chat_id)) or {})
+        return base
+
+    def set_profile(self, chat_id, **values) -> dict:
+        with self.lock:
+            profile = self._profiles().setdefault(str(chat_id), {})
+            profile.update(values)
+            self._flush()
+            return dict(profile)
+
+    # --- реализованный результат дня по подписчику (в R, чтобы не зависеть от депозита)
+
+    def add_day_r(self, chat_id, r: float, day: str, keep_days: int = 7) -> float:
+        with self.lock:
+            days = self.data.setdefault("day_r", {})
+            today = days.setdefault(str(day), {})
+            total = round(today.get(str(chat_id), 0.0) + float(r), 4)
+            today[str(chat_id)] = total
+            for old in sorted(days)[:-keep_days]:
+                days.pop(old, None)
+            self._flush()
+            return total
+
+    def day_r_for(self, chat_id, day: str) -> float:
+        return float((self.data.get("day_r") or {}).get(str(day), {}).get(str(chat_id), 0.0))
+
+    # --- незавершённый ввод (например, своя сумма депозита)
+
+    def pending_for(self, chat_id) -> str | None:
+        return (self.data.get("pending") or {}).get(str(chat_id))
+
+    def set_pending(self, chat_id, field: str | None) -> None:
+        with self.lock:
+            pending = self.data.setdefault("pending", {})
+            if field:
+                pending[str(chat_id)] = field
+            else:
+                pending.pop(str(chat_id), None)
+            self._flush()
+
+    def pause_notice_seen(self, chat_id) -> str | None:
+        return (self.data.get("pause_notice") or {}).get(str(chat_id))
+
+    def set_pause_notice(self, chat_id, day: str) -> None:
+        with self.lock:
+            self.data.setdefault("pause_notice", {})[str(chat_id)] = day
+            self._flush()
 
     # --- сделки по инструментам
     def _trades(self) -> dict:

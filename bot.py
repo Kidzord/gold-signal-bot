@@ -52,7 +52,7 @@ logging.basicConfig(
 log = logging.getLogger("bot")
 
 COMMANDS = [
-    {"command": "start", "description": "Подписаться на сигналы"},
+    {"command": "start", "description": "Настройки: депозит, риск, дневной стоп"},
     {"command": "signal", "description": "Обзор рынка / по инструменту"},
     {"command": "stats", "description": "Статистика стратегии"},
     {"command": "params", "description": "Правила стратегии"},
@@ -66,7 +66,7 @@ COMMANDS = [
 
 HELP_TEXT = (
     "📖 <b>Команды</b>\n"
-    "/start — подписаться на сигналы\n"
+    "/start — настройки: депозит, риск, дневной стоп, стратегия\n"
     "/signal — обзор по всем инструментам\n"
     "/signal gold — детально по инструменту\n"
     "/stats gold — статистика стратегии\n"
@@ -115,12 +115,57 @@ SMT_TEXT = (
 
 RISK_LIMITS_DEFAULT = {"daily_r": -2.0, "weekly_r": -3.0, "monthly_r": -7.0}
 
+# --- персональные настройки: варианты в приветственном окне
+DEPOSIT_PRESETS = (5000, 10000, 25000)
+RISK_PRESETS = (0.5, 1.0, 2.0)
+DAY_LIMIT_PRESETS = (3.0, 5.0, 10.0)
+
+# одна общая стратегия на всех; в списке только те, у кого есть честный бэктест
+STRATEGY_CHOICES = [
+    ("breakout", "🎯 Пробой канала"),
+    ("msnr", "📐 MSNR отбой"),
+    ("msnr_trend", "🚀 MSNR 8R"),
+]
+
+STRATEGY_PROS_CONS = {
+    "breakout": ("PF 1.41, 302 сделки за 2 года — просто и стабильно, сигналов больше всех.",
+                 "Винрейт ~35%, ложные пробои в узком рынке, нужен тренд."),
+    "msnr": ("PF 1.27, 257 сделок, вход от уровня — короткий и понятный стоп.",
+             "Винрейт 30%, сделок меньше, нужны свежие уровни."),
+    "msnr_trend": ("PF 2.16, ожидание +0.76R, цель 8R — редкие, но крупные сделки.",
+                   "Всего 68 сделок, вся прибыль на покупках."),
+}
+
 NY = ZoneInfo("America/New_York")
 
 
 def _trading_day(ts: datetime):
     """Торговый день проп-фирмы: граница в 17:00 по Нью-Йорку (00:00 сервера)."""
     return (ts.astimezone(NY) - timedelta(hours=17)).date()
+
+
+def _money(value: float) -> str:
+    """Сумма в долларах с пробелами между разрядами: 5000 -> «$5 000»."""
+    return f"${value:,.0f}".replace(",", " ")
+
+
+def _signed_money(value: float) -> str:
+    sign = "+" if value >= 0 else "−"
+    return f"{sign}${abs(value):,.0f}".replace(",", " ")
+
+
+def _parse_amount(text: str) -> float | None:
+    """Разбор суммы из сообщения: «5000», «5 000», «$12k», «7,5k»."""
+    cleaned = (text or "").strip().lower().replace("$", "").replace("\u00a0", "").replace(" ", "")
+    factor = 1.0
+    if cleaned.endswith("k"):
+        factor, cleaned = 1000.0, cleaned[:-1]
+    cleaned = cleaned.replace(",", ".")
+    try:
+        value = float(cleaned) * factor
+    except ValueError:
+        return None
+    return value if value > 0 else None
 
 
 class Bot:
@@ -171,15 +216,29 @@ class Bot:
             targets.append(channel)
         return targets
 
-    def broadcast(self, text: str, preview: bool = False, photo: str | None = None) -> int:
-        """Рассылает текст всем получателям; photo — картинка-карточка с подписью."""
+    def broadcast(self, text: str, preview: bool = False, photo: str | None = None,
+                  skip_paused: bool = False, personalize=None) -> int:
+        """Рассылает текст всем получателям; photo — картинка-карточка с подписью.
+
+        skip_paused=True — пропустить подписчиков, у которых сработал дневной стоп.
+        personalize — функция (chat_id) -> str: личная версия текста (например, % от
+        депозита подписчика). Для канала берётся общий текст.
+        """
         sent = 0
         for chat_id in self._targets():
+            if skip_paused and isinstance(chat_id, int) and self._is_paused(chat_id):
+                log.info("Подписчик %s на дневной паузе — сигнал не шлю", chat_id)
+                continue
+            body = text
+            if personalize and isinstance(chat_id, int):
+                custom = personalize(chat_id)
+                if custom:
+                    body = custom
             try:
-                if photo and self._send_photo(chat_id, photo, text):
+                if photo and self._send_photo(chat_id, photo, body):
                     sent += 1
                 else:
-                    for part in tg.split_message(text):
+                    for part in tg.split_message(body):
                         self.api.send(chat_id, part, preview=preview)
                         sent += 1
                 time.sleep(0.05)
@@ -192,7 +251,7 @@ class Bot:
                     log.info("Подписчик %s удалён (бот заблокирован)", chat_id)
         return sent
 
-    def _send_photo(self, chat_id, path: str, caption: str) -> bool:
+    def _send_photo(self, chat_id, path: str, caption: str, buttons=None) -> bool:
         """Фото с подписью. False — не вышло (вызывающий откатится на текст).
 
         Подпись длиннее лимита Telegram карточка не примет — тогда текст уходит
@@ -201,25 +260,27 @@ class Bot:
         if not os.path.exists(path):
             return False
         try:
-            self.api.send_photo(chat_id, path, caption=caption)
+            self.api.send_photo(chat_id, path, caption=caption, buttons=buttons)
         except tg.TgError as exc:
             log.warning("Карточка не отправлена в %s: %s", chat_id, exc)
             return False
         if caption and len(caption) > tg.PHOTO_CAPTION_LIMIT:
             for part in tg.split_message(caption):
-                self.api.send(chat_id, part)
+                self.api.send(chat_id, part, buttons=buttons)
         return True
 
     def _reply(self, chat_id, reply: str | dict) -> None:
-        """Ответ на команду: строку — текстом, {'photo', 'text'} — картинкой с подписью."""
+        """Ответ на команду: строку — текстом, {'photo','text','buttons'} — картинкой с подписью."""
         if isinstance(reply, dict):
             photo = reply.get("photo")
             text = reply.get("text") or ""
-            if photo and self._send_photo(chat_id, photo, text):
+            buttons = reply.get("buttons")
+            if photo and self._send_photo(chat_id, photo, text, buttons=buttons):
                 return
-            if text:
-                for part in tg.split_message(text):
-                    self.api.send(chat_id, part)
+            parts = tg.split_message(text) if text else []
+            for position, part in enumerate(parts):
+                last = position == len(parts) - 1
+                self.api.send(chat_id, part, buttons=buttons if last else None)
             return
         for part in tg.split_message(reply):
             self.api.send(chat_id, part)
@@ -228,6 +289,225 @@ class Bot:
         if not key:
             return None
         return inst_mod.find(self.instruments, key)
+
+    # ------------------------------------------------------------ персональные настройки
+
+    def _profile(self, chat_id) -> dict:
+        """Депозит, риск на сделку и дневной стоп подписчика (из state.json)."""
+        return self.state.profile_for(chat_id, self.config.get("default_profile"))
+
+    def _current_strategy(self) -> str:
+        if not self.instruments:
+            return st.DEFAULT_STRATEGY
+        inst = self.instruments[0]
+        return (inst.strategies or [inst.strategy])[0]
+
+    def _is_paused(self, chat_id) -> bool:
+        """True — у подписчика сработал дневной стоп (в % от депозита)."""
+        profile = self._profile(chat_id)
+        limit = abs(float(profile["day_limit"]))
+        if limit <= 0:
+            return False
+        day = _trading_day(datetime.now(timezone.utc)).isoformat()
+        pct = self.state.day_r_for(chat_id, day) * float(profile["risk"])
+        return pct <= -limit
+
+    def _settings_text(self, chat_id) -> str:
+        """Приветственное окно: текущие настройки и результат дня."""
+        p = self._profile(chat_id)
+        deposit = float(p["deposit"])
+        risk = float(p["risk"])
+        day_limit = abs(float(p["day_limit"]))
+        strategy = self._current_strategy()
+        pros, cons = STRATEGY_PROS_CONS.get(strategy, ("", ""))
+
+        names = ", ".join(f"{i.name} ({i.timeframe})" for i in self.instruments)
+        day = _trading_day(datetime.now(timezone.utc)).isoformat()
+        pct_today = self.state.day_r_for(chat_id, day) * risk
+        money_today = _signed_money(deposit * pct_today / 100)
+        if day_limit > 0 and self._is_paused(chat_id):
+            today = (f"⏸ Дневной стоп: <b>{pct_today:+.2f}%</b> ({money_today}) — "
+                     "пауза до конца дня.")
+        else:
+            today = (f"📊 Сегодня: <b>{pct_today:+.2f}%</b> ({money_today}) "
+                     f"из −{day_limit:.2f}% лимита.")
+
+        edge = f"\n<i>+ {tg.esc(pros)}\n− {tg.esc(cons)}</i>" if pros else ""
+        return (
+            f"👋 <b>Сигналы · {tg.esc(names)}</b>\n\n"
+            f"🧩 Стратегия: <b>{tg.esc(self._title(strategy))}</b>{edge}\n\n"
+            "<b>Ваши настройки</b>\n"
+            f"💰 Депозит: <b>{_money(deposit)}</b>\n"
+            f"📉 Риск на сделку: <b>{risk:.2f}%</b> · {_money(deposit * risk / 100)}\n"
+            f"🛡 Дневной стоп: <b>{day_limit:.2f}%</b> · {_money(deposit * day_limit / 100)}\n"
+            f"{today}\n\n"
+            "Все сигналы приходят со стопом, целью и итогом <b>в % от депозита и в "
+            "долларах</b>. При дневном стопе новые сигналы для вас на паузе до конца дня.\n\n"
+            "<b>Выберите значения кнопками ниже</b> 👇\n"
+            "<i>Не является индивидуальной инвестиционной рекомендацией.</i>"
+        )
+
+    def _settings_buttons(self, chat_id) -> list[list[tuple[str, str]]]:
+        p = self._profile(chat_id)
+        deposit, risk, day_limit = float(p["deposit"]), float(p["risk"]), float(p["day_limit"])
+        strategy = self._current_strategy()
+
+        def mark(value: float, current: float) -> str:
+            return "✅ " if abs(value - current) < 1e-6 else ""
+
+        rows: list[list[tuple[str, str]]] = [
+            [("💰 Депозит", "noop")],
+            [(f"{mark(float(d), deposit)}{_money(d)}", f"dep:{d}") for d in DEPOSIT_PRESETS],
+        ]
+        custom = all(abs(deposit - float(d)) > 1e-6 for d in DEPOSIT_PRESETS)
+        rows.append([(f"✅ ✍️ Своя: {_money(deposit)}" if custom else "✍️ Своя сумма",
+                      "dep:custom")])
+        rows.append([("📉 Риск на сделку", "noop")])
+        rows.append([(f"{mark(r, risk)}{r:g}%", f"risk:{r}") for r in RISK_PRESETS])
+        rows.append([("🛡 Дневной стоп", "noop")])
+        rows.append([(f"{mark(d, day_limit)}{d:g}%", f"day:{d}") for d in DAY_LIMIT_PRESETS])
+        rows.append([(f"🧩 Стратегия: {self._title(strategy)}", "noop")])
+        rows.append([(("✅ " if key == strategy else "") + label, f"strat:{key}")
+                     for key, label in STRATEGY_CHOICES])
+        rows.append([("♻️ Сбросить настройки", "reset")])
+        return rows
+
+    def _redraw_window(self, chat_id, message_id: int, has_photo: bool) -> None:
+        """Перерисовывает окно настроек после нажатия кнопки."""
+        text = self._settings_text(chat_id)
+        buttons = self._settings_buttons(chat_id)
+        try:
+            if has_photo:
+                self.api.edit_caption(chat_id, message_id, text, buttons=buttons)
+            else:
+                self.api.edit_text(chat_id, message_id, text, buttons=buttons)
+        except tg.TgError as exc:
+            log.info("Окно настроек не обновлено: %s", exc)
+
+    def _set_strategy(self, key: str) -> None:
+        """Одна общая стратегия: применяется ко всем инструментам."""
+        for inst in self.instruments:
+            inst.strategies = [key]
+            inst.strategy = key
+            # в GitHub Actions config.json пересоздаётся каждый запуск — выбор держим в state.json
+            self.state.data.setdefault("instrument_overrides", {})[inst.key] = [key]
+        self._persist_instruments()
+        self.state._flush()
+        self._bt_cache.clear()
+
+    def handle_callback(self, cb: dict) -> None:
+        """Нажатие инлайн-кнопки в окне настроек."""
+        data = str(cb.get("data") or "")
+        msg = cb.get("message") or {}
+        chat = msg.get("chat") or {}
+        chat_id = chat.get("id")
+        message_id = msg.get("message_id")
+        user_id = (cb.get("from") or {}).get("id", 0)
+        if chat_id is None or self.api is None:
+            return
+
+        note = ""
+        redraw = False
+        if data == "noop":
+            note = "Выберите значение кнопкой ниже"
+        elif data.startswith("dep:"):
+            value = data.split(":", 1)[1]
+            if value == "custom":
+                self.state.set_pending(chat_id, "deposit")
+                note = "Введите сумму числом"
+                self.api.send(chat_id, self._deposit_prompt())
+            else:
+                amount = _parse_amount(value) or 0.0
+                if amount > 0:
+                    self.state.set_profile(chat_id, deposit=amount)
+                    note = f"Депозит: {_money(amount)}"
+                    redraw = True
+        elif data.startswith("risk:"):
+            amount = _parse_amount(data.split(":", 1)[1]) or 0.0
+            if 0 < amount <= 100:
+                self.state.set_profile(chat_id, risk=amount)
+                note = f"Риск на сделку: {amount:g}%"
+                redraw = True
+        elif data.startswith("day:"):
+            amount = _parse_amount(data.split(":", 1)[1]) or 0.0
+            if 0 < amount <= 100:
+                self.state.set_profile(chat_id, day_limit=amount)
+                note = f"Дневной стоп: {amount:g}%"
+                redraw = True
+        elif data.startswith("strat:"):
+            key = data.split(":", 1)[1]
+            if user_id != self.state.admin_id:
+                note = "Стратегию задаёт автор канала"
+            elif key not in st.CATALOG:
+                note = "Нет такой стратегии"
+            else:
+                self._set_strategy(key)
+                note = f"Стратегия: {self._title(key)}"
+                redraw = True
+        elif data == "reset":
+            self.state.set_profile(chat_id, **storage.DEFAULT_PROFILE)
+            note = "Настройки сброшены"
+            redraw = True
+
+        try:
+            self.api.answer_callback(str(cb.get("id") or ""), note)
+        except tg.TgError as exc:
+            log.warning("answerCallbackQuery: %s", exc)
+
+        if redraw and message_id:
+            self._redraw_window(chat_id, message_id, bool(msg.get("photo")))
+
+    def _deposit_prompt(self) -> str:
+        return ("✍️ Введите сумму депозита числом, например <b>5000</b>, <b>12k</b> "
+                "или <b>7,5k</b>.\nОтмена — /start.")
+
+    def _apply_pending_text(self, chat_id, text: str) -> None:
+        """Подписчик вводит «свою сумму» в ответ на приглашение кнопки."""
+        field = self.state.pending_for(chat_id)
+        self.state.set_pending(chat_id, None)
+        amount = _parse_amount(text)
+        if amount is None or not 100 <= amount <= 10_000_000:
+            self.api.send(chat_id, "❌ Не понял сумму. Введите число, например <b>5000</b>.\n"
+                                   "Отмена — /start.")
+            return
+        if field == "deposit":
+            self.state.set_profile(chat_id, deposit=amount)
+        try:
+            self.api.send(chat_id, self._settings_text(chat_id),
+                          buttons=self._settings_buttons(chat_id))
+        except tg.TgError as exc:
+            log.warning("Окно настроек в %s не отправлено: %s", chat_id, exc)
+
+    def _pause_text(self, profile: dict, pct: float) -> str:
+        deposit = float(profile["deposit"])
+        limit = abs(float(profile["day_limit"]))
+        return (
+            "🛑 <b>Дневной стоп сработал</b>\n\n"
+            f"Результат дня: <b>{pct:.2f}%</b> ({_signed_money(deposit * pct / 100)}) — "
+            f"достигнут ваш лимит {limit:.2f}%.\n"
+            "Новые сигналы для вас на паузе до конца торгового дня.\n"
+            "<i>Открытые сделки продолжаю сопровождать. Настроить: /start</i>"
+        )
+
+    def _track_day_result(self, r: float, notify: bool) -> None:
+        """Учитывает закрытую сделку в дневном результате каждого подписчика."""
+        day = _trading_day(datetime.now(timezone.utc)).isoformat()
+        for chat_id in self.state.subscribers:
+            profile = self._profile(chat_id)
+            limit = abs(float(profile["day_limit"]))
+            total = self.state.add_day_r(chat_id, r, day)
+            if limit <= 0:
+                continue
+            pct = total * float(profile["risk"])
+            if pct > -limit or self.state.pause_notice_seen(chat_id) == day:
+                continue
+            self.state.set_pause_notice(chat_id, day)
+            log.info("Дневной стоп у %s: %.2f%% — пауза до конца дня", chat_id, pct)
+            if notify:
+                try:
+                    self.api.send(chat_id, self._pause_text(profile, pct))
+                except tg.TgError as exc:
+                    log.warning("Уведомление о паузе в %s: %s", chat_id, exc)
 
     # ------------------------------------------------------------ риск-лимиты
 
@@ -586,12 +866,17 @@ class Bot:
                 self.state.close_trade(key, closed)
                 report["closed"].append((key, result))
                 log.info("Сделка %s закрыта: %s %.2fR", key, result["reason"], result["r"])
+                self._track_day_result(result["r"], notify)
                 if notify:
+                    title = self._title(strategy)
+                    card = self._close_card(inst, trade, result)
                     self.broadcast(
-                        analysis.format_close(
+                        analysis.format_close(trade, result, inst.name, self.tz, inst.digits,
+                                              strategy_title=title),
+                        photo=card,
+                        personalize=lambda cid: analysis.format_close(
                             trade, result, inst.name, self.tz, inst.digits,
-                            strategy_title=self._title(strategy)),
-                        photo=self._close_card(inst, trade, result),
+                            strategy_title=title, profile=self._profile(cid)),
                     )
             return
 
@@ -644,11 +929,16 @@ class Bot:
         # id сигнала (side-бар) не содержит инструмент: три слота на одном баре дали бы один id
         dedupe_key = f"{key}:{signal['id']}"
         if notify and self.state.mark_sent(dedupe_key):
+            title = self._title(strategy)
+            card = self._signal_card(inst, signal, df)
             sent = self.broadcast(
-                analysis.format_signal(
+                analysis.format_signal(signal, inst.name, self.tz, inst.timeframe, inst.digits,
+                                       strategy_title=title),
+                photo=card,
+                skip_paused=True,
+                personalize=lambda cid: analysis.format_signal(
                     signal, inst.name, self.tz, inst.timeframe, inst.digits,
-                    strategy_title=self._title(strategy)),
-                photo=self._signal_card(inst, signal, df),
+                    strategy_title=title, profile=self._profile(cid)),
             )
             log.info("Сигнал %s/%s %s @ %.4f -> %s получателей",
                      inst.key, strategy, signal["side"], signal["entry"], sent)
@@ -751,16 +1041,19 @@ class Bot:
         args = parts[1:]
 
         if cmd == "start":
+            self.state.set_pending(chat_id, None)
             added = self.state.add_subscriber(chat_id)
             if not self.state.admin_id:
                 self.state.admin_id = user_id  # первый подписчик становится админом
             if chat_id == self.state.admin_id and self.state.data.get("admin_unsubscribed"):
                 self.state.data["admin_unsubscribed"] = False
                 self.state._flush()
-            head = f"👋 Привет{', ' + username if username else ''}!\n\n" if added else "Вы уже подписаны.\n\n"
-            greeting = head + self._welcome()
-            photo = self._welcome_card()
-            return {"photo": photo, "text": greeting} if photo else greeting
+            head = f"👋 Привет{', ' + username if username else ''}!\n\n" if added else ""
+            return {
+                "photo": self._welcome_card(),
+                "text": head + self._settings_text(chat_id),
+                "buttons": self._settings_buttons(chat_id),
+            }
 
         if cmd == "help":
             return HELP_TEXT
@@ -971,21 +1264,6 @@ class Bot:
             ))
         return "\n\n".join(blocks)
 
-    def _welcome(self) -> str:
-        names = ", ".join(f"{i.name} ({i.timeframe})" for i in self.instruments)
-        return (
-            f"Я присылаю сигналы по: {names}.\n\n"
-            "<b>Как это работает</b>\n"
-            "• пробой канала в направлении тренда (ADX + ATR фильтры);\n"
-            "• стоп 1.5×ATR, тейк 2R, лимит по времени;\n"
-            "• проверяю закрытие каждого бара, сигналов 2–4 в неделю;\n"
-            "• присылаю и вход, и закрытие сделки.\n\n"
-            "<b>Бэктест:</b> золото H1 — 302 сделки, PF 1.41; "
-            "EURUSD H4 — 89 сделок, PF 1.33; GBPUSD H4 — 107 сделок, PF 1.40.\n\n"
-            "Команды: /signal, /stats, /params, /status, /unsubscribe\n\n"
-            "<i>Это не инвестиционная рекомендация: сигналы не учитывают ваш депозит и риск-профиль.</i>"
-        )
-
     # ------------------------------------------------------------ цикл
 
     def setup(self) -> None:
@@ -1021,7 +1299,14 @@ class Bot:
         return token
 
     def handle_update(self, upd: dict) -> None:
-        """Обрабатывает одно обновление Telegram (команда, материал, пост канала)."""
+        """Обрабатывает одно обновление Telegram (команда, материал, пост канала, кнопка)."""
+        if "callback_query" in upd:
+            try:
+                self.handle_callback(upd["callback_query"])
+            except Exception:  # noqa: BLE001 — нажатие кнопки не должно ронять цикл
+                log.exception("Ошибка обработки нажатия кнопки")
+            return
+
         msg = upd.get("message") or upd.get("channel_post") or {}
         chat = msg.get("chat") or {}
         if "id" not in chat:
@@ -1030,6 +1315,12 @@ class Bot:
         in_channel = chat.get("type") == "channel"
 
         if not text.startswith("/"):
+            if not in_channel and self.state.pending_for(chat["id"]):
+                try:
+                    self._apply_pending_text(chat["id"], text)
+                except tg.TgError as exc:
+                    log.warning("Ввод суммы в %s не обработан: %s", chat["id"], exc)
+                return
             try:
                 note = self.save_material(msg)
             except Exception:  # noqa: BLE001

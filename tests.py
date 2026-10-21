@@ -18,7 +18,7 @@ import pandas as pd
 import analysis
 import indicators
 import storage
-from bot import Bot
+from bot import Bot, _parse_amount, _trading_day
 
 
 class FakeTg:
@@ -27,16 +27,34 @@ class FakeTg:
     def __init__(self):
         self.sent: list[tuple] = []
         self.photos: list[tuple] = []
+        self.buttons: list = []
+        self.calls: list[tuple] = []
+        self.edits: list[tuple] = []
         self.commands = None
 
-    def send(self, chat_id, text, preview: bool = False):
+    def send(self, chat_id, text, preview: bool = False, buttons=None):
         self.sent.append((chat_id, text))
+        self.buttons.append(buttons)
         return {"message_id": len(self.sent)}
 
-    def send_photo(self, chat_id, path: str, caption: str = "", html: bool = True):
+    def send_photo(self, chat_id, path: str, caption: str = "", html: bool = True, buttons=None):
         self.photos.append((chat_id, path, caption))
+        self.buttons.append(buttons)
         self.sent.append((chat_id, caption))
         return {"message_id": len(self.sent)}
+
+    def answer_callback(self, callback_id: str, text: str = "") -> bool:
+        self.calls.append(("answer", callback_id, text))
+        return True
+
+    def edit_caption(self, chat_id, message_id: int, caption: str, buttons=None, html: bool = True):
+        self.edits.append(("caption", chat_id, message_id, caption, buttons))
+        return {"message_id": message_id}
+
+    def edit_text(self, chat_id, message_id: int, text: str, buttons=None, preview: bool = False,
+                  html: bool = True):
+        self.edits.append(("text", chat_id, message_id, text, buttons))
+        return {"message_id": message_id}
 
     def set_commands(self, commands):
         self.commands = commands
@@ -143,14 +161,80 @@ def main() -> None:
     check("выход по времени на 48-м баре", res3 is not None and res3["reason"] == "TIME" and res3["bars"] == 48,
           f"bars={res3['bars']}" if res3 else "")
 
-    # --- команды
+    # --- приветственное окно: настройки депозита, риска, дневного стопа и стратегии
     reply = bot.handle_command(111, 111, "/start", "Иван")
     check("/start подписывает", 111 in st.subscribers and "Привет" in text_of(reply))
     check("/start назначает админа", st.admin_id == 111)
-    check("/start повторно не дублирует",
-          "уже подписаны" in text_of(bot.handle_command(111, 111, "/start")))
+    window = text_of(reply)
+    check("/start показывает окно настроек", "Ваши настройки" in window and "Депозит" in window)
+    check("/start повторно показывает окно",
+          "Ваши настройки" in text_of(bot.handle_command(111, 111, "/start")))
+    check("к окну приложены инлайн-кнопки", isinstance(reply, dict) and bool(reply.get("buttons")))
     if isinstance(reply, dict):
         check("приветствие приходит карточкой", bool(reply["photo"]))
+
+    profile = bot._profile(111)
+    check("дефолт: депозит 5000, риск 1%, дневной стоп 5%",
+          profile["deposit"] == 5000.0 and profile["risk"] == 1.0 and profile["day_limit"] == 5.0)
+    check("в окне риск в % и в $", "1.00%" in window and "$50" in window)
+    check("в окне плюсы и минусы стратегии", "+ PF" in window and "−" in window)
+    check("подписи кнопок собраны из настроек",
+          any("$10 000" in b[0] for row in reply["buttons"] for b in row))
+
+    # --- нажатия инлайн-кнопок
+    def press(data: str, user_id: int = 111, photo: bool = False) -> None:
+        msg: dict = {"message_id": 1, "chat": {"id": 111, "type": "private"}}
+        if photo:
+            msg["photo"] = [{"file_id": "AAA"}]
+        bot.handle_callback({"id": f"cb-{data}", "data": data, "from": {"id": user_id},
+                             "message": msg})
+
+    press("noop")
+    check("кнопка-заголовок отвечает подсказкой",
+          bot.api.calls[-1][2] == "Выберите значение кнопкой ниже")
+
+    press("dep:10000")
+    check("кнопка меняет депозит", bot._profile(111)["deposit"] == 10000.0)
+    press("risk:2")
+    check("кнопка меняет риск", bot._profile(111)["risk"] == 2.0)
+    press("day:3")
+    check("кнопка меняет дневной стоп", bot._profile(111)["day_limit"] == 3.0)
+
+    bot.api.edits.clear()
+    press("dep:25000", photo=True)
+    check("окно перерисовывается правкой подписи",
+          bool(bot.api.edits) and bot.api.edits[-1][0] == "caption")
+    check("подпись обновлена с кнопками", bot.api.edits[-1][4] is not None)
+    check("депозит = 25 000", bot._profile(111)["deposit"] == 25000.0)
+
+    press("strat:msnr", user_id=222)
+    check("не-админ не меняет стратегию", bot._current_strategy() == "breakout")
+    press("strat:msnr")
+    check("админ меняет стратегию кнопкой", bot._current_strategy() == "msnr")
+    check("стратегия применилась ко всем инструментам",
+          all(i.slots == ["msnr"] for i in bot.instruments))
+    press("strat:breakout")
+    check("стратегия вернулась на пробой", bot._current_strategy() == "breakout")
+
+    press("reset")
+    check("кнопка сбрасывает настройки",
+          bot._profile(111)["deposit"] == 5000.0 and bot._profile(111)["risk"] == 1.0)
+
+    # своя сумма: кнопка -> приглашение -> текст -> снова окно
+    press("dep:custom")
+    check("кнопка просит ввести сумму", st.pending_for(111) == "deposit")
+    bot.handle_update({"message": {"chat": {"id": 111, "type": "private"},
+                                   "from": {"id": 111}, "text": "12 500"}})
+    check("своя сумма принята (пробел в разрядах)", bot._profile(111)["deposit"] == 12500.0)
+    check("после ввода снова показано окно",
+          any(cid == 111 and "Ваши настройки" in txt for cid, txt in bot.api.sent))
+    press("dep:custom")
+    bot.handle_update({"message": {"chat": {"id": 111, "type": "private"},
+                                   "from": {"id": 111}, "text": "не число"}})
+    check("мусор вместо суммы не меняет депозит", bot._profile(111)["deposit"] == 12500.0)
+    check("ожидание ввода сброшено", st.pending_for(111) is None)
+    check("суммы «12k» и «7,5k» разбираются",
+          _parse_amount("12k") == 12000.0 and _parse_amount("7,5k") == 7500.0)
 
     reply = bot.handle_command(222, 222, "/help")
     check("/help отвечает справкой", "Команды" in reply)
@@ -258,6 +342,8 @@ def main() -> None:
         sent_text = [t for t in bot.api.sent if t[0] == 333][-1][1]
         check("сообщение < 4096 символов", len(sent_text) < 4096, f"{len(sent_text)}")
         check("сообщение содержит уровни", "Вход:" in sent_text and "Стоп:" in sent_text and "Тейк:" in sent_text)
+        check("в сигнале ожидание в % и $, а не в R",
+              "Риск:" in sent_text and "1.00% = $50" in sent_text and "Депозит $5 000" in sent_text)
         if bot._card():
             check("сигнал ушёл карточкой с графиком",
                   any(p[0] == 333 for p in bot.api.photos), f"{len(bot.api.photos)} карточек")
@@ -356,11 +442,40 @@ def main() -> None:
     check("/risk показывает паузу", "пауза" in bot.handle_command(111, 111, "/risk"))
     check("/risk содержит лимиты", "день" in bot.handle_command(111, 111, "/risk"))
 
+    # --- персональный дневной стоп: % от депозита и пауза до конца дня
+    st.add_subscriber(444)
+    st.set_profile(444, deposit=1000.0, risk=1.0, day_limit=5.0)
+    day = _trading_day(datetime.now(timezone.utc)).isoformat()
+    bot.api.sent.clear()
+    bot._track_day_result(-2.0, notify=True)
+    check("дневной результат копится по подписчику", st.day_r_for(444, day) == -2.0)
+    check("при -2% паузы нет", not bot._is_paused(444))
+    bot._track_day_result(-3.5, notify=True)
+    check("при -5.5% срабатывает дневной стоп", bot._is_paused(444))
+    check("уведомление о паузе отправлено",
+          any(cid == 444 and "Дневной стоп" in txt for cid, txt in bot.api.sent))
+    sent_before = sum(1 for cid, _ in bot.api.sent if cid == 444)
+    bot._track_day_result(-1.0, notify=True)
+    check("уведомление о паузе не дублируется",
+          sum(1 for cid, _ in bot.api.sent if cid == 444) == sent_before)
+    check("окно показывает паузу и дневной итог",
+          "пауза" in bot._settings_text(444) and "-6.50%" in bot._settings_text(444))
+
     # --- тексты
     text = analysis.format_close(trade, {"exit": trade["tp"], "reason": "TP",
                                          "exit_time": df.index[-1].isoformat(), "bars": 5,
                                          "pnl_usd": 10.0, "r": 2.0}, "XAUUSD", "Europe/Minsk")
     check("сообщение о закрытии корректно", "ТЕЙК" in text and "+2.00R" in text)
+
+    money = {"deposit": 5000.0, "risk": 1.0, "day_limit": 5.0}
+    text_money = analysis.format_close(trade, {"exit": trade["tp"], "reason": "TP",
+                                               "exit_time": df.index[-1].isoformat(), "bars": 5,
+                                               "pnl_usd": 10.0, "r": 2.0},
+                                       "XAUUSD", "Europe/Minsk", profile=money)
+    check("в закрытии результат в % и $", "+2.00% (+$100)" in text_money)
+    check("в сигнале риск и цель в % и $",
+          "Риск: <b>1.00% = $50</b>" in analysis.format_signal(
+              sig, "XAUUSD", "Europe/Minsk", "1h", 2, "Пробой", profile=money))
 
     failed = globals().get("FAILED", 0)
     print("\n" + ("ВСЕ ТЕСТЫ ПРОЙДЕНЫ" if failed == 0 else f"ПРОВАЛОВ: {failed}"))

@@ -184,8 +184,29 @@ def _signed_dist(value: float, digits: int) -> str:
     return sign + _dist(abs(value), digits)
 
 
+def _usd(value: float) -> str:
+    """Сумма с пробелами между разрядами: 5000 -> «5 000»."""
+    return f"{value:,.0f}".replace(",", " ")
+
+
+def money_line(profile: dict, r: float) -> str:
+    """Результат сделки в долях депозита: «+2.00% (+$100)» вместо «+2.00R»."""
+    pct = r * float(profile["risk"])
+    usd = float(profile["deposit"]) * pct / 100.0
+    sign = "+" if pct >= 0 else "−"
+    return f"{sign}{abs(pct):.2f}% ({sign}${_usd(abs(usd))})"
+
+
+def _risk_money(profile: dict, koef: float) -> str:
+    """Строка «риск 1.00% = $50» для сигнала: koef — множитель риска (1 для стопа)."""
+    pct = float(profile["risk"]) * koef
+    usd = float(profile["deposit"]) * pct / 100.0
+    return f"{pct:.2f}% = ${_usd(usd)}"
+
+
 def format_signal(sig: dict, name: str, tz_name: str, timeframe: str = "1h",
-                  digits: int = 2, strategy_title: str | None = None) -> str:
+                  digits: int = 2, strategy_title: str | None = None,
+                  profile: dict | None = None) -> str:
     long_ = sig["side"] == "long"
     emoji = "🟢" if long_ else "🔴"
     word = "ПОКУПКА" if long_ else "ПРОДАЖА"
@@ -196,6 +217,16 @@ def format_signal(sig: dict, name: str, tz_name: str, timeframe: str = "1h",
     real_rr = tp_dist / r_dist if r_dist else 0.0
     d = digits
     sub = f"\n<i>{tg.esc(strategy_title)}</i>" if strategy_title else ""
+    money = ""
+    rr_line = f"Риск/прибыль: 1 : {real_rr:.1f}\n"
+    if profile:
+        # вместо RR показываем ожидание в % от депозита и в долларах
+        rr_line = ""
+        money = (
+            f"💰 Риск: <b>{_risk_money(profile, 1.0)}</b>\n"
+            f"🎯 Цель: <b>+{_risk_money(profile, real_rr)}</b>\n"
+            f"💼 Депозит ${_usd(float(profile['deposit']))}\n"
+        )
     return (
         f"🔔 <b>СИГНАЛ {tg.esc(name)} · {timeframe.upper()}</b>{sub}\n"
         f"<b>{emoji} {word} {arrow}</b>\n"
@@ -203,7 +234,8 @@ def format_signal(sig: dict, name: str, tz_name: str, timeframe: str = "1h",
         f"Вход: <b>{sig['entry']:.{d}f}</b>\n"
         f"Стоп: {sig['stop']:.{d}f} <i>(-{_dist(r_dist, d)})</i>\n"
         f"Тейк: {sig['tp']:.{d}f} <i>(+{_dist(tp_dist, d)})</i>\n"
-        f"Риск/прибыль: 1 : {real_rr:.1f}\n"
+        f"{rr_line}"
+        f"{money}"
         f"────────────────\n"
         f"📊 ADX {sig['adx']:.0f} · ATR {_dist(sig['atr'], d)} · тренд {tg.esc(sig['trend'])}\n"
         f"🧩 {tg.esc(sig['reason'])}\n"
@@ -214,7 +246,7 @@ def format_signal(sig: dict, name: str, tz_name: str, timeframe: str = "1h",
 
 
 def format_close(trade: dict, result: dict, name: str, tz_name: str, digits: int = 2,
-                 strategy_title: str | None = None) -> str:
+                 strategy_title: str | None = None, profile: dict | None = None) -> str:
     long_ = trade["side"] == "long"
     word = "LONG" if long_ else "SHORT"
     if result["reason"] == "TP":
@@ -224,10 +256,12 @@ def format_close(trade: dict, result: dict, name: str, tz_name: str, digits: int
     else:
         head = "⏱ <b>ЗАКРЫТО ПО ВРЕМЕНИ</b>"
     sign = "+" if result["r"] >= 0 else "−"
+    # вместо «±X.XXR» показываем результат в долях депозита подписчика
+    score = money_line(profile, result["r"]) if profile else f"{sign}{abs(result['r']):.2f}R"
     d = digits
     sub = f"\n<i>{tg.esc(strategy_title)}</i>" if strategy_title else ""
     return (
-        f"{head} · {word} · {sign}{abs(result['r']):.2f}R{sub}\n"
+        f"{head} · {word} · {score}{sub}\n"
         f"────────────────\n"
         f"{tg.esc(name)}: {trade['entry']:.{d}f} → {result['exit']:.{d}f} "
         f"({_signed_dist(result['pnl_usd'], d)})\n"

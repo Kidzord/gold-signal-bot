@@ -57,6 +57,18 @@ def _multipart(fields: dict[str, str], photo: bytes, filename: str,
     return bytes(out), f"multipart/form-data; boundary={boundary}"
 
 
+def _keyboard(buttons: list[list[tuple[str, str]]] | None) -> dict | None:
+    """reply_markup с инлайн-кнопками: [[(подпись, callback_data), ...], ...]."""
+    if not buttons:
+        return None
+    return {
+        "inline_keyboard": [
+            [{"text": str(text), "callback_data": str(data)} for text, data in row]
+            for row in buttons
+        ]
+    }
+
+
 class Tg:
     def __init__(self, token: str, timeout: int = 65):
         self.token = token
@@ -107,16 +119,20 @@ class Tg:
     def get_updates(self, offset: int | None = None, timeout: int = 50):
         params = {
             "timeout": timeout,
-            "allowed_updates": ["message", "channel_post"],
+            "allowed_updates": ["message", "channel_post", "callback_query"],
             "limit": 100,
         }
         if offset is not None:
             params["offset"] = offset
         return self.call("getUpdates", **params)
 
-    def send(self, chat_id, text: str, preview: bool = False, html: bool = True):
+    def send(self, chat_id, text: str, preview: bool = False, html: bool = True,
+             buttons: list[list[tuple[str, str]]] | None = None):
         """Отправляет текст; html=True — parse_mode=HTML с фолбэком на plain-text."""
         common = {"chat_id": chat_id, "disable_web_page_preview": not preview}
+        markup = _keyboard(buttons)
+        if markup:
+            common["reply_markup"] = markup
         if html:
             try:
                 return self.call("sendMessage", text=text, parse_mode="HTML", **common)
@@ -129,7 +145,51 @@ class Tg:
     def set_commands(self, commands: list[dict]) -> bool:
         return bool(self.call("setMyCommands", commands=commands))
 
-    def send_photo(self, chat_id, path: str, caption: str = "", html: bool = True):
+    # --- карточки с кнопками: нажатие приходит как callback_query
+
+    def answer_callback(self, callback_id: str, text: str = "") -> bool:
+        """Убирает «часики» на кнопке; text — короткая подсказка (до 200 символов)."""
+        return bool(self.call("answerCallbackQuery", callback_query_id=callback_id,
+                              text=text[:200]))
+
+    def edit_caption(self, chat_id, message_id: int, caption: str,
+                     buttons: list[list[tuple[str, str]]] | None = None, html: bool = True):
+        """Меняет подпись под карточкой и её кнопки."""
+        params: dict = {"chat_id": chat_id, "message_id": message_id, "caption": caption}
+        markup = _keyboard(buttons)
+        if markup:
+            params["reply_markup"] = markup
+        if html:
+            try:
+                return self.call("editMessageCaption", parse_mode="HTML", **params)
+            except TgError as exc:
+                if not _is_parse_error(exc):
+                    raise
+                log.warning("HTML-подпись не принята (%s) — повтор без parse_mode", exc)
+                params["caption"] = _html_to_plain(caption)
+        return self.call("editMessageCaption", **params)
+
+    def edit_text(self, chat_id, message_id: int, text: str,
+                  buttons: list[list[tuple[str, str]]] | None = None, preview: bool = False,
+                  html: bool = True):
+        """Меняет текст сообщения и его кнопки (для тех, кто писал без карточки)."""
+        params: dict = {"chat_id": chat_id, "message_id": message_id, "text": text,
+                        "disable_web_page_preview": not preview}
+        markup = _keyboard(buttons)
+        if markup:
+            params["reply_markup"] = markup
+        if html:
+            try:
+                return self.call("editMessageText", parse_mode="HTML", **params)
+            except TgError as exc:
+                if not _is_parse_error(exc):
+                    raise
+                log.warning("HTML не принят (%s) — повтор без parse_mode", exc)
+                params["text"] = _html_to_plain(text)
+        return self.call("editMessageText", **params)
+
+    def send_photo(self, chat_id, path: str, caption: str = "", html: bool = True,
+                   buttons: list[list[tuple[str, str]]] | None = None):
         """Отправляет PNG с подписью (multipart). Подпись длиннее лимита отбрасываем."""
         with open(path, "rb") as fh:
             blob = fh.read()
@@ -139,6 +199,9 @@ class Tg:
             fields["caption"] = caption
             if html:
                 fields["parse_mode"] = "HTML"
+        markup = _keyboard(buttons)
+        if markup:
+            fields["reply_markup"] = json.dumps(markup, ensure_ascii=False)
 
         body, content_type = _multipart(fields, blob, filename)
         try:
