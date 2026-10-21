@@ -37,7 +37,7 @@ def main() -> None:
         exits.append(dict(label=f"trail{trail}", tp_r=0.0, trail_atr=trail, be_after_r=None))
 
     rows = []
-    for key, (meta, fn) in st.CATALOG.items():
+    for key, (_meta, fn) in st.CATALOG.items():
         sig = fn(df)
         for stop_mult, ex, max_bars, sess in itertools.product(
             (0.8, 1.0, 1.2, 1.5), exits, (12, 24, 48), (None, (7, 20))

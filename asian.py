@@ -27,8 +27,6 @@ def asian_range_signals(
     hours = idx.hour.to_numpy()
     days = idx.date
 
-    high = df["high"].to_numpy(float)
-    low = df["low"].to_numpy(float)
     close = df["close"].to_numpy(float)
     atr = df["atr"].to_numpy(float)
 

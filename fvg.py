@@ -47,7 +47,6 @@ def fvg_signals(
     l = df["low"].to_numpy(float)
     c = df["close"].to_numpy(float)
     atr = df["atr"].to_numpy(float)
-    ts = df.index
 
     fvgs = find_fvgs(df, min_gap_atr=min_gap_atr, max_age=max_age)
 

@@ -122,7 +122,7 @@ def main() -> None:
 
     # --- сопровождение: время
     bars = []
-    for k in range(1, 60):
+    for _k in range(1, 60):
         bars.append({"open": trade["entry"], "high": trade["entry"] + 1,
                      "low": trade["entry"] - 1, "close": trade["entry"] + 0.5})
     slow = pd.DataFrame(bars, index=[df.index[-1] + pd.Timedelta(hours=k) for k in range(1, 60)])

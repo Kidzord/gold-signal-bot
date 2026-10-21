@@ -32,7 +32,7 @@ def folds_min(df, sig, cfg, k=4) -> float:
 
 def main() -> None:
     rows = []
-    for symbol, name, spread, pip in PAIRS:
+    for symbol, name, spread, _pip in PAIRS:
         raw = market.closed_bars(market.get_history(symbol, "1h", "730d", max_age_seconds=600), "1h")
         df = indicators.enrich(raw).dropna(subset=["ema200", "atr", "adx", "atr_median"])
         print(f"\n=== {name}: {len(df)} баров")

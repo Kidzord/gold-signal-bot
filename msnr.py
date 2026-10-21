@@ -128,7 +128,6 @@ def signals_from_zones(
     atr = df["atr"].to_numpy(float)
     ema50 = df["ema50"].to_numpy(float)
     ema200 = df["ema200"].to_numpy(float)
-    ts = df.index
 
     long_sig = np.zeros(n, bool)
     short_sig = np.zeros(n, bool)

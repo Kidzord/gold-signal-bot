@@ -47,11 +47,10 @@ def main() -> None:
     peak = equity.copy()
     for i in range(1, len(equity)):
         peak[i] = max(peak[i - 1], equity[i])
-    dd = peak - equity
 
     img = Image.new("RGB", (W, H), BG)
     d = ImageDraw.Draw(img)
-    f_title, f_sub, f_axis, f_small = font(30), font(18), font(16), font(14)
+    f_title, f_sub, f_small = font(30), font(18), font(14)
 
     d.text((PAD_L, 26), "Золото H1 · пробой канала: эквити в R", font=f_title, fill=TEXT)
     s = bt.stats(tr)

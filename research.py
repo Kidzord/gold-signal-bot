@@ -48,7 +48,7 @@ def main() -> None:
     table.to_csv("cache/research_results.csv", index=False)
 
     print("\n\n=== Walk-forward (4 С„РѕР»РґР°, СЃРµСЃСЃРёСЏ 07-20, СЃРїСЂРµРґ 0.30)")
-    for key, (meta, fn) in st.CATALOG.items():
+    for key, (_meta, fn) in st.CATALOG.items():
         def runner(part, fn=fn):
             sig = fn(part)
             return bt.simulate(part, sig, bt.BtConfig(spread=0.30, session=None, be_after_r=None))

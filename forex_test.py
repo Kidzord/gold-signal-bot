@@ -11,7 +11,6 @@ import backtest as bt
 import dbo
 import indicators
 import market
-import msnr
 import ranges
 import strategy as st
 

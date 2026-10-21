@@ -103,7 +103,7 @@ def main() -> None:
     h4_zones = msnr.htf_zones(df, rule="4h", strength=3)
     for label, zones in (("h1", h1_zones), ("h4", h4_zones)):
         near = near_zone_mask(df, zones, width=1.0)
-        for need in (True,):
+        for _need in (True,):
             s2 = base_sig.copy()
             s2["long_signal"] = s2["long_signal"] & pd.Series(near, index=df.index)
             s2["short_signal"] = s2["short_signal"] & pd.Series(near, index=df.index)

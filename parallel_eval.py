@@ -5,13 +5,10 @@ import sys
 
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
-import numpy as np
 import pandas as pd
 
 import analysis
 import backtest as bt
-import indicators
-import market
 import strategy as st
 
 df = analysis.load_frame("GC=F")

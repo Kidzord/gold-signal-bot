@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime
 from zoneinfo import ZoneInfo
 
 import numpy as np
@@ -250,7 +249,6 @@ def msnr_levels(df: pd.DataFrame, rule: str = "4h") -> dict | None:
 def format_state(df: pd.DataFrame, state: dict, name: str, tz_name: str, strategy: str,
                  timeframe: str = "1h", params: dict | None = None, digits: int = 2) -> str:
     s = market_state(df)
-    unit = _unit(digits)
     d = digits
     chan = int((params or {}).get("channel", 24))
     chan_hi = float(df["high"].rolling(chan).max().shift(1).iloc[-1])

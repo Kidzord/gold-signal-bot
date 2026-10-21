@@ -230,7 +230,8 @@ class Bot:
 
     def _risk_message(self, inst: inst_mod.Instrument, period: str, status: dict) -> str:
         word = {"day": "дневной", "week": "недельный", "month": "месячный"}[period]
-        limit = status["limits"][f"{period}_r"]
+        limit_key = {"day": "daily_r", "week": "weekly_r", "month": "monthly_r"}[period]
+        limit = status["limits"][limit_key]
         until = {
             "day": "до завтра",
             "week": "до следующей недели",

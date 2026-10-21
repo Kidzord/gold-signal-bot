@@ -19,7 +19,7 @@
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import numpy as np
 import pandas as pd
@@ -132,7 +132,6 @@ def dbo_signals(
     low = df["low"].to_numpy(float)
     close = df["close"].to_numpy(float)
     atr = df["atr"].to_numpy(float)
-    ts = df.index
 
     events = find_events(df, scan_length=scan_length)
     _upgrade_events(events)
