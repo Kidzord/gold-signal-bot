@@ -37,6 +37,7 @@ from tg import Tg
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 LOG_PATH = os.path.join(BASE_DIR, "bot.log")
 MATERIALS_DIR = os.path.join(BASE_DIR, "materials")
+REPORT_DIR = os.path.join(BASE_DIR, "report")
 
 _handlers = [RotatingFileHandler(LOG_PATH, maxBytes=5 * 1024 * 1024, backupCount=3,
                                   encoding="utf-8")]
@@ -170,13 +171,17 @@ class Bot:
             targets.append(channel)
         return targets
 
-    def broadcast(self, text: str, preview: bool = False) -> int:
+    def broadcast(self, text: str, preview: bool = False, photo: str | None = None) -> int:
+        """Рассылает текст всем получателям; photo — картинка-карточка с подписью."""
         sent = 0
         for chat_id in self._targets():
             try:
-                for part in tg.split_message(text):
-                    self.api.send(chat_id, part, preview=preview)
+                if photo and self._send_photo(chat_id, photo, text):
                     sent += 1
+                else:
+                    for part in tg.split_message(text):
+                        self.api.send(chat_id, part, preview=preview)
+                        sent += 1
                 time.sleep(0.05)
             except tg.TgError as exc:
                 log.warning("Не удалось отправить в %s: %s", chat_id, exc)
@@ -186,6 +191,38 @@ class Bot:
                     self.state.remove_subscriber(chat_id)
                     log.info("Подписчик %s удалён (бот заблокирован)", chat_id)
         return sent
+
+    def _send_photo(self, chat_id, path: str, caption: str) -> bool:
+        """Фото с подписью. False — не вышло (вызывающий откатится на текст).
+
+        Подпись длиннее лимита Telegram карточка не примет — тогда текст уходит
+        отдельным сообщением, чтобы сигнал не потерялся.
+        """
+        if not os.path.exists(path):
+            return False
+        try:
+            self.api.send_photo(chat_id, path, caption=caption)
+        except tg.TgError as exc:
+            log.warning("Карточка не отправлена в %s: %s", chat_id, exc)
+            return False
+        if caption and len(caption) > tg.PHOTO_CAPTION_LIMIT:
+            for part in tg.split_message(caption):
+                self.api.send(chat_id, part)
+        return True
+
+    def _reply(self, chat_id, reply: str | dict) -> None:
+        """Ответ на команду: строку — текстом, {'photo', 'text'} — картинкой с подписью."""
+        if isinstance(reply, dict):
+            photo = reply.get("photo")
+            text = reply.get("text") or ""
+            if photo and self._send_photo(chat_id, photo, text):
+                return
+            if text:
+                for part in tg.split_message(text):
+                    self.api.send(chat_id, part)
+            return
+        for part in tg.split_message(reply):
+            self.api.send(chat_id, part)
 
     def _instrument(self, key: str | None) -> inst_mod.Instrument | None:
         if not key:
@@ -490,6 +527,52 @@ class Bot:
         except KeyError:
             return strategy
 
+    # ------------------------------------------------------------ карточки
+
+    @staticmethod
+    def _card() -> object | None:
+        """Модуль карточек; None — если Pillow не установлен (шлём текстом)."""
+        try:
+            import card
+        except ImportError:
+            log.info("Pillow не установлен — оформление идёт текстом")
+            return None
+        return card
+
+    def _signal_card(self, inst: inst_mod.Instrument, signal: dict, df) -> str | None:
+        module = self._card()
+        if not module:
+            return None
+        path = os.path.join(REPORT_DIR, f"signal_{inst.key}.png")
+        try:
+            return module.render_signal_card(
+                signal, df, inst.name, inst.timeframe, inst.digits, self.tz, path)
+        except Exception:  # noqa: BLE001 — картинка не должна ломать отправку сигнала
+            log.exception("Карточка сигнала %s не нарисована", inst.key)
+            return None
+
+    def _close_card(self, inst: inst_mod.Instrument, trade: dict, result: dict) -> str | None:
+        module = self._card()
+        if not module:
+            return None
+        path = os.path.join(REPORT_DIR, f"close_{inst.key}.png")
+        try:
+            return module.render_result_card(
+                trade, result, inst.name, inst.timeframe, inst.digits, self.tz, path)
+        except Exception:  # noqa: BLE001
+            log.exception("Карточка закрытия %s не нарисована", inst.key)
+            return None
+
+    def _welcome_card(self) -> str | None:
+        module = self._card()
+        if not module:
+            return None
+        try:
+            return module.render_welcome_card(self.instruments, os.path.join(REPORT_DIR, "welcome.png"))
+        except Exception:  # noqa: BLE001
+            log.exception("Приветственная карточка не нарисована")
+            return None
+
     def _scan_slot(self, inst: inst_mod.Instrument, strategy: str, df, notify: bool,
                    report: dict, allow_new: bool = True) -> None:
         key = self._slot_key(inst, strategy)
@@ -504,9 +587,12 @@ class Bot:
                 report["closed"].append((key, result))
                 log.info("Сделка %s закрыта: %s %.2fR", key, result["reason"], result["r"])
                 if notify:
-                    self.broadcast(analysis.format_close(
-                        trade, result, inst.name, self.tz, inst.digits,
-                        strategy_title=self._title(strategy)))
+                    self.broadcast(
+                        analysis.format_close(
+                            trade, result, inst.name, self.tz, inst.digits,
+                            strategy_title=self._title(strategy)),
+                        photo=self._close_card(inst, trade, result),
+                    )
             return
 
         if not allow_new:  # фид устарел — новые входы не открываем
@@ -558,9 +644,12 @@ class Bot:
         # id сигнала (side-бар) не содержит инструмент: три слота на одном баре дали бы один id
         dedupe_key = f"{key}:{signal['id']}"
         if notify and self.state.mark_sent(dedupe_key):
-            sent = self.broadcast(analysis.format_signal(
-                signal, inst.name, self.tz, inst.timeframe, inst.digits,
-                strategy_title=self._title(strategy)))
+            sent = self.broadcast(
+                analysis.format_signal(
+                    signal, inst.name, self.tz, inst.timeframe, inst.digits,
+                    strategy_title=self._title(strategy)),
+                photo=self._signal_card(inst, signal, df),
+            )
             log.info("Сигнал %s/%s %s @ %.4f -> %s получателей",
                      inst.key, strategy, signal["side"], signal["entry"], sent)
         elif notify:
@@ -655,7 +744,8 @@ class Bot:
 
     # ------------------------------------------------------------ команды
 
-    def handle_command(self, chat_id: int, user_id: int, text: str, username: str = "") -> str | None:
+    def handle_command(self, chat_id: int, user_id: int, text: str,
+                       username: str = "") -> str | dict | None:
         parts = text.strip().split()
         cmd = parts[0][1:].split("@")[0].lower() if parts else ""
         args = parts[1:]
@@ -668,7 +758,9 @@ class Bot:
                 self.state.data["admin_unsubscribed"] = False
                 self.state._flush()
             head = f"👋 Привет{', ' + username if username else ''}!\n\n" if added else "Вы уже подписаны.\n\n"
-            return head + self._welcome()
+            greeting = head + self._welcome()
+            photo = self._welcome_card()
+            return {"photo": photo, "text": greeting} if photo else greeting
 
         if cmd == "help":
             return HELP_TEXT
@@ -960,7 +1052,7 @@ class Bot:
             reply = "⚠️ Внутренняя ошибка, попробуйте позже."
         if reply:
             try:
-                self.api.send(chat["id"], reply)
+                self._reply(chat["id"], reply)
             except tg.TgError as exc:
                 log.warning("Ответ в %s не доставлен: %s", chat["id"], exc)
 

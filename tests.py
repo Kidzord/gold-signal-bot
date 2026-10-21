@@ -26,10 +26,16 @@ class FakeTg:
 
     def __init__(self):
         self.sent: list[tuple] = []
+        self.photos: list[tuple] = []
         self.commands = None
 
     def send(self, chat_id, text, preview: bool = False):
         self.sent.append((chat_id, text))
+        return {"message_id": len(self.sent)}
+
+    def send_photo(self, chat_id, path: str, caption: str = "", html: bool = True):
+        self.photos.append((chat_id, path, caption))
+        self.sent.append((chat_id, caption))
         return {"message_id": len(self.sent)}
 
     def set_commands(self, commands):
@@ -63,6 +69,13 @@ def make_frame(n: int = 700) -> pd.DataFrame:
     df = pd.DataFrame({"open": open_, "high": high, "low": low, "close": close,
                        "volume": 100.0}, index=idx)
     return indicators.enrich(df).dropna(subset=["ema200", "atr", "adx", "atr_median", "don_hi"])
+
+
+def text_of(reply) -> str:
+    """Текст ответа: /start может вернуть карточку в виде {'photo', 'text'}."""
+    if isinstance(reply, dict):
+        return reply.get("text") or ""
+    return reply or ""
 
 
 def check(name: str, condition: bool, detail: str = "") -> None:
@@ -132,9 +145,12 @@ def main() -> None:
 
     # --- команды
     reply = bot.handle_command(111, 111, "/start", "Иван")
-    check("/start подписывает", 111 in st.subscribers and "Привет" in reply)
+    check("/start подписывает", 111 in st.subscribers and "Привет" in text_of(reply))
     check("/start назначает админа", st.admin_id == 111)
-    check("/start повторно не дублирует", "уже подписаны" in bot.handle_command(111, 111, "/start"))
+    check("/start повторно не дублирует",
+          "уже подписаны" in text_of(bot.handle_command(111, 111, "/start")))
+    if isinstance(reply, dict):
+        check("приветствие приходит карточкой", bool(reply["photo"]))
 
     reply = bot.handle_command(222, 222, "/help")
     check("/help отвечает справкой", "Команды" in reply)
@@ -242,6 +258,9 @@ def main() -> None:
         sent_text = [t for t in bot.api.sent if t[0] == 333][-1][1]
         check("сообщение < 4096 символов", len(sent_text) < 4096, f"{len(sent_text)}")
         check("сообщение содержит уровни", "Вход:" in sent_text and "Стоп:" in sent_text and "Тейк:" in sent_text)
+        if bot._card():
+            check("сигнал ушёл карточкой с графиком",
+                  any(p[0] == 333 for p in bot.api.photos), f"{len(bot.api.photos)} карточек")
 
         report2 = bot.scan_once(notify=True)
         check("повторный проход без изменений молчит", not report2["signals"])

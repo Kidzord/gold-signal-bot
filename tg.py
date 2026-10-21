@@ -20,6 +20,8 @@ USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) GoldSignalBot/1.0"
 
 MAX_DOWNLOAD_BYTES = 25 * 1024 * 1024  # лимит Bot API: 20 МиБ для getFile, 25 МиБ с запасом
 DOWNLOAD_CHUNK = 64 * 1024  # читаем ответ чанками, а не целиком в память
+PHOTO_CAPTION_LIMIT = 1024  # лимит Bot API на подпись к фото
+BOUNDARY = "----GoldSignalBotBoundary4f2c7a1d"
 
 
 class TgError(RuntimeError):
@@ -37,17 +39,36 @@ def _html_to_plain(text: str) -> str:
     return html.unescape(re.sub(r"<[^>]+>", "", text))
 
 
+def _multipart(fields: dict[str, str], photo: bytes, filename: str,
+               boundary: str = BOUNDARY) -> tuple[bytes, str]:
+    """Собирает тело multipart/form-data: текстовые поля + один файл photo."""
+    out = bytearray()
+    for name, value in fields.items():
+        out += f"--{boundary}\r\n".encode("utf-8")
+        out += f'Content-Disposition: form-data; name="{name}"\r\n\r\n'.encode("utf-8")
+        out += str(value).encode("utf-8") + b"\r\n"
+    out += f"--{boundary}\r\n".encode("utf-8")
+    out += (
+        f'Content-Disposition: form-data; name="photo"; filename="{filename}"\r\n'
+        f"Content-Type: image/png\r\n\r\n"
+    ).encode("utf-8")
+    out += photo + b"\r\n"
+    out += f"--{boundary}--\r\n".encode("utf-8")
+    return bytes(out), f"multipart/form-data; boundary={boundary}"
+
+
 class Tg:
     def __init__(self, token: str, timeout: int = 65):
         self.token = token
         self.timeout = timeout
 
     def call(self, method: str, **params):
-        url = API.format(token=self.token, method=method)
         body = json.dumps(params).encode("utf-8")
-        req = urllib.request.Request(
-            url, data=body, headers={"Content-Type": "application/json"}
-        )
+        return self._call_raw(method, body, "application/json")
+
+    def _call_raw(self, method: str, body: bytes, content_type: str):
+        url = API.format(token=self.token, method=method)
+        req = urllib.request.Request(url, data=body, headers={"Content-Type": content_type})
         for attempt in range(3):
             try:
                 with urllib.request.urlopen(req, timeout=self.timeout) as resp:
@@ -107,6 +128,28 @@ class Tg:
 
     def set_commands(self, commands: list[dict]) -> bool:
         return bool(self.call("setMyCommands", commands=commands))
+
+    def send_photo(self, chat_id, path: str, caption: str = "", html: bool = True):
+        """Отправляет PNG с подписью (multipart). Подпись длиннее лимита отбрасываем."""
+        with open(path, "rb") as fh:
+            blob = fh.read()
+        filename = os.path.basename(path)
+        fields = {"chat_id": str(chat_id)}
+        if caption and len(caption) <= PHOTO_CAPTION_LIMIT:
+            fields["caption"] = caption
+            if html:
+                fields["parse_mode"] = "HTML"
+
+        body, content_type = _multipart(fields, blob, filename)
+        try:
+            return self._call_raw("sendPhoto", body, content_type)
+        except TgError as exc:
+            if "parse_mode" not in fields or not _is_parse_error(exc):
+                raise
+            log.warning("HTML-подпись к фото отклонена Telegram (%s) — повтор без parse_mode", exc)
+        fields.pop("parse_mode", None)
+        body, content_type = _multipart(fields, blob, filename)
+        return self._call_raw("sendPhoto", body, content_type)
 
     # --- файлы (для сбора материалов)
     def get_file(self, file_id: str) -> dict:
