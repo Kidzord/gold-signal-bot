@@ -20,6 +20,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Проверить токен
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+        run: |
+          if [ -z "${TELEGRAM_BOT_TOKEN}" ]; then
+            echo "::error::Секрет TELEGRAM_BOT_TOKEN не задан или пуст — бот не сможет отправить ни одного сигнала. Добавьте его: Settings -> Secrets and variables -> Actions -> New repository secret, имя TELEGRAM_BOT_TOKEN."
+            exit 1
+          fi
+
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
