@@ -46,6 +46,9 @@ jobs:
       - name: Зависимости
         run: pip install -q -r requirements-bot.txt
 
+      - name: Шрифты для карточек
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq fonts-dejavu-core
+
       - name: Конфиг без токена
         run: cp config.ci.json config.json
 
