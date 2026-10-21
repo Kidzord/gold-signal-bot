@@ -34,6 +34,7 @@ DEFAULT_STATE = {
     "started_at": None,
     "sent_ids": [],
     "instrument_overrides": {},
+    "admin_unsubscribed": False,
 }
 
 

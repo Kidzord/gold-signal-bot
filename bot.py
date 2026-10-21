@@ -121,6 +121,9 @@ class Bot:
         admin = self.config.get("admin_id") or os.environ.get("ADMIN_ID")
         if admin:
             self.state.admin_id = int(admin)
+        # владелец получает сигналы всегда, даже если state.json потерялся
+        if self.state.admin_id and not self.state.data.get("admin_unsubscribed"):
+            self.state.add_subscriber(int(self.state.admin_id))
         self.instruments = inst_mod.from_config(self.config.get("instruments"))
         if not self.config.get("instruments"):
             self._persist_instruments()
@@ -651,6 +654,9 @@ class Bot:
             added = self.state.add_subscriber(chat_id)
             if not self.state.admin_id:
                 self.state.admin_id = user_id  # первый подписчик становится админом
+            if chat_id == self.state.admin_id and self.state.data.get("admin_unsubscribed"):
+                self.state.data["admin_unsubscribed"] = False
+                self.state._flush()
             head = f"👋 Привет{', ' + username if username else ''}!\n\n" if added else "Вы уже подписаны.\n\n"
             return head + self._welcome()
 
@@ -663,6 +669,10 @@ class Bot:
 
         if cmd in {"stop", "unsubscribe"}:
             removed = self.state.remove_subscriber(chat_id)
+            if chat_id == self.state.admin_id:
+                # чтобы автоподписка владельца не отменяла явный /unsubscribe
+                self.state.data["admin_unsubscribed"] = True
+                self.state._flush()
             return "Подписка отключена. Вернуться: /start" if removed else "Вы не были подписаны."
 
         if cmd == "signal":
