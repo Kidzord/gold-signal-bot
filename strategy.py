@@ -176,6 +176,33 @@ def fvg_retest(df: pd.DataFrame) -> pd.DataFrame:
     return fvg.fvg_signals(df, mode="confirm", min_gap_atr=0.25, rr=3.0)
 
 
+def smt_divergence(df: pd.DataFrame, sibling: str = "SI=F", k: int = 2,
+                   stop_atr: float = 1.5, rr: float = 3.0) -> pd.DataFrame:
+    """I. SMT: расхождение «золото против серебра» (экспериментальная).
+
+    Если на экстремуме золото обновляет предыдущий максимум, а серебро — нет
+    (или наоборот по минимумам), ждём разворот золота в сторону серебра.
+    Свечи серебра подтягиваются отдельно и выравниваются по сетке инструмента.
+
+    ⚠️ На H1 даёт PF ~1.16 / ожидание +0.11R при 206 сделках — заметно слабее
+    breakout (PF 1.41 / +0.24R), walk-forward нестабилен. По умолчанию не включена.
+    """
+    import market
+    import smt
+
+    silver = market.get_history(sibling, "1h", "730d")
+    if len(df) > 2:
+        step = df.index.to_series().diff().median()
+        hours = max(int(round(step.total_seconds() / 3600)), 1)
+        if hours > 1:
+            silver = (
+                silver.resample(f"{hours}h")
+                .agg({"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"})
+                .dropna()
+            )
+    return smt.smt_signals(df, silver, k=k, stop_atr=stop_atr, rr=rr)
+
+
 CATALOG: dict[str, tuple[Strategy, object]] = {
     "pullback": (Strategy("pullback", "Тренд + откат (EMA50/200, RSI, ADX)", 1.5, 2.0), trend_pullback),
     "breakout": (Strategy("breakout", "Пробой канала 24ч + тренд", 1.5, 2.0), breakout),
@@ -186,9 +213,11 @@ CATALOG: dict[str, tuple[Strategy, object]] = {
     "macd": (Strategy("macd", "Импульс MACD + тренд", 1.5, 1.5), macd_momentum),
     "msnr": (Strategy("msnr", "MSNR: отбой от свежего уровня, 2R", 1.5, 2.0), msnr_break),
     "msnr_trend": (Strategy("msnr_trend", "MSNR + высокий RR: цель 8R", 1.5, 8.0, max_bars=120), msnr_trend),
+    "smt": (Strategy("smt", "SMT: расхождение золото/серебро (эксперимент)", 1.5, 3.0), smt_divergence),
 }
 
 CHANNEL_DEFAULTS = {"channel": 24, "stop_atr": 1.5, "rr": 2.0}
+SMT_DEFAULTS = {"sibling": "SI=F", "k": 2, "stop_atr": 1.5, "rr": 3.0}
 
 
 def signals_for(name: str, df: pd.DataFrame, params: dict | None = None) -> pd.DataFrame:
@@ -200,6 +229,12 @@ def signals_for(name: str, df: pd.DataFrame, params: dict | None = None) -> pd.D
             if params and key in params:
                 opts[key] = params[key]
         return channel_breakout(df, **opts)
+    if name == "smt":
+        opts = dict(SMT_DEFAULTS)
+        for key in list(opts):
+            if params and key in params:
+                opts[key] = params[key]
+        return smt_divergence(df, **opts)
     return fn(df)
 
 # Стратегия, выбранная по результатам бэктеста (см. REPORT.md)

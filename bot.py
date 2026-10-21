@@ -103,6 +103,15 @@ MSNR_TREND_TEXT = (
     "⚠️ Вся прибыль на покупках — это ставка на растущий тренд."
 )
 
+SMT_TEXT = (
+    "⚙️ <b>SMT: расхождение золото/серебро</b> (экспериментальная)\n\n"
+    "Пивоты ищутся фракталом (k баров слева и справа). Если на экстремуме золото\n"
+    "обновляет предыдущий максимум, а серебро — нет (или наоборот по минимумам),\n"
+    "это расхождение и вход по золоту в сторону серебра.\n\n"
+    "⚠️ Бэктест H1 (730 дн.): 206 сделок, 33% побед, PF 1.16, ожидание +0.11R —\n"
+    "слабее breakout (PF 1.41, +0.24R), walk-forward нестабилен. По умолчанию выключена."
+)
+
 RISK_LIMITS_DEFAULT = {"daily_r": -2.0, "weekly_r": -3.0, "monthly_r": -7.0}
 
 NY = ZoneInfo("America/New_York")
@@ -696,6 +705,8 @@ class Bot:
                 return MSNR_TEXT
             if inst.strategy == "msnr_trend":
                 return MSNR_TREND_TEXT
+            if inst.strategy == "smt":
+                return SMT_TEXT
             return STRATEGY_TEXT
 
         if cmd == "strategy":
